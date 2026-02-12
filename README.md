@@ -4,18 +4,25 @@ An LP-based algorithm for optimizing mediator assignments in court mediation sys
 
 ## Installation
 
+Using uv (recommended):
+```bash
+uv sync
+source .venv/bin/activate
+```
+
+Optional variants:
+
+```bash
+uv sync --dev                  # development dependencies
+uv sync --extra gurobi         # Gurobi support
+uv sync --dev --extra gurobi   # dev + Gurobi
+```
+
+Using pip (alternative):
 ```bash
 pip install -e .
-```
-
-For development:
-```bash
-pip install -e ".[dev]"
-```
-
-For Gurobi support:
-```bash
-pip install -e ".[gurobi]"
+pip install -e ".[dev]"  # for development
+pip install -e ".[gurobi]"  # for Gurobi support
 ```
 
 ## Usage
