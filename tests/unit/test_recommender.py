@@ -37,8 +37,8 @@ class TestGetRecommendations:
         """Test that result has correct structure."""
         case = SimpleCase(
             id=1,
-            case_type_id="Family group",
-            court_station_id="KAKAMEGA",
+            case_type="Family group",
+            court_station="KAKAMEGA",
             referral_date=date(2023, 1, 1),
             p_value=0.5,
         )
@@ -63,8 +63,8 @@ class TestGetRecommendations:
         """Test that top mediator has highest VA when loads are equal."""
         case = SimpleCase(
             id=1,
-            case_type_id="Family group",
-            court_station_id="KAKAMEGA",
+            case_type="Family group",
+            court_station="KAKAMEGA",
             referral_date=date(2023, 1, 1),
             p_value=0.5,
         )
@@ -89,8 +89,8 @@ class TestGetRecommendations:
         """Test that only eligible mediators are recommended."""
         case = SimpleCase(
             id=1,
-            case_type_id="Family group",
-            court_station_id="MILIMANI",
+            case_type="Family group",
+            court_station="MILIMANI",
             referral_date=date(2023, 1, 1),
             p_value=0.5,
         )
@@ -115,8 +115,8 @@ class TestGetRecommendations:
         """Test that high case loads influence assignment."""
         case = SimpleCase(
             id=1,
-            case_type_id="Family group",
-            court_station_id="KAKAMEGA",
+            case_type="Family group",
+            court_station="KAKAMEGA",
             referral_date=date(2023, 1, 1),
             p_value=0.5,
         )
@@ -141,8 +141,8 @@ class TestGetRecommendations:
         """Test that ground truth strategy uses provided VAs."""
         case = SimpleCase(
             id=1,
-            case_type_id="Family group",
-            court_station_id="KAKAMEGA",
+            case_type="Family group",
+            court_station="KAKAMEGA",
             referral_date=date(2023, 1, 1),
             p_value=0.5,
         )
@@ -170,8 +170,8 @@ class TestGetRecommendations:
         """Test that no eligible mediators returns empty recommendations."""
         case = SimpleCase(
             id=1,
-            case_type_id="Commercial Cases",
-            court_station_id="MILIMANI",
+            case_type="Commercial Cases",
+            court_station="MILIMANI",
             referral_date=date(2023, 1, 1),
             p_value=0.5,
         )
@@ -201,8 +201,8 @@ class TestGetRecommendationsBatch:
         cases = [
             SimpleCase(
                 id=i,
-                case_type_id="Family group",
-                court_station_id="KAKAMEGA",
+                case_type="Family group",
+                court_station="KAKAMEGA",
                 referral_date=date(2023, 1, 1),
                 p_value=0.5,
             )
@@ -233,8 +233,8 @@ class TestGetRecommendationsBatch:
         cases = [
             SimpleCase(
                 id=1,
-                case_type_id="Family group",
-                court_station_id="KAKAMEGA",
+                case_type="Family group",
+                court_station="KAKAMEGA",
                 referral_date=date(2023, 1, 1),
                 p_value=0.5,
             )
@@ -286,8 +286,8 @@ class TestIntegration:
         """Test complete workflow with Scenario 1."""
         case = SimpleCase(
             id=1,
-            case_type_id="Family group",
-            court_station_id="KAKAMEGA",
+            case_type="Family group",
+            court_station="KAKAMEGA",
             referral_date=date(2023, 1, 1),
             p_value=0.5,
         )
@@ -318,15 +318,15 @@ class TestIntegration:
         cases = [
             SimpleCase(
                 id=1,
-                case_type_id="Family group",
-                court_station_id="MILIMANI",
+                case_type="Family group",
+                court_station="MILIMANI",
                 referral_date=date(2023, 1, 1),
                 p_value=0.5,
             ),
             SimpleCase(
                 id=2,
-                case_type_id="Family group",
-                court_station_id="KAKAMEGA",
+                case_type="Family group",
+                court_station="KAKAMEGA",
                 referral_date=date(2023, 1, 1),
                 p_value=0.5,
             ),

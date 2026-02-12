@@ -92,8 +92,8 @@ def generate_phantom_cases(
 
                 phantom_case = SimpleCase(
                     id=phantom_id,
-                    case_type_id=case_type,
-                    court_station_id=court_station,
+                    case_type=case_type,
+                    court_station=court_station,
                     referral_date=arrival_date,
                     p_value=p_val - 0.1,
                 )

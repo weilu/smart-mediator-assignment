@@ -44,8 +44,8 @@ class TestFullPipeline:
         todays_cases = [
             SimpleCase(
                 id=i,
-                case_type_id="Family group",
-                court_station_id="KAKAMEGA" if i % 2 == 0 else "MILIMANI",
+                case_type="Family group",
+                court_station="KAKAMEGA" if i % 2 == 0 else "MILIMANI",
                 referral_date=current_day,
                 p_value=0.5 + (i % 3) * 0.1,
             )
@@ -110,8 +110,8 @@ class TestFullPipeline:
             todays_cases = [
                 SimpleCase(
                     id=day_offset * 10 + i,
-                    case_type_id="Family group",
-                    court_station_id="KAKAMEGA",
+                    case_type="Family group",
+                    court_station="KAKAMEGA",
                     referral_date=current_day,
                     p_value=0.5,
                 )
@@ -169,8 +169,8 @@ class TestFullPipeline:
         many_cases = [
             SimpleCase(
                 id=i,
-                case_type_id="Family group",
-                court_station_id="KAKAMEGA",
+                case_type="Family group",
+                court_station="KAKAMEGA",
                 referral_date=current_day,
                 p_value=0.5,
             )
@@ -241,8 +241,8 @@ class TestFullPipeline:
         cases = [
             SimpleCase(
                 id=i,
-                case_type_id="Family group",
-                court_station_id="KAKAMEGA",
+                case_type="Family group",
+                court_station="KAKAMEGA",
                 referral_date=current_day,
                 p_value=0.5,
             )

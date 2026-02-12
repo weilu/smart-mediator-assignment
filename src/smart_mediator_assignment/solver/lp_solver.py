@@ -99,8 +99,8 @@ class LPSolver(BaseSolver):
         all_cases = phantom_cases + unassigned_cases
 
         for case in all_cases:
-            station_id = case.court_station_id
-            type_id = case.case_type_id
+            station_id = case.court_station
+            type_id = case.case_type
 
             if station_id not in self.med_by_court_case_type:
                 continue

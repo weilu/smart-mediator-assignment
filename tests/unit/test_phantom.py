@@ -90,7 +90,7 @@ class TestGeneratePhantomCases:
         assert id1 == id2
         for c1, c2 in zip(cases1, cases2):
             assert c1.id == c2.id
-            assert c1.court_station_id == c2.court_station_id
+            assert c1.court_station == c2.court_station
 
     def test_different_seeds_produce_different_results(self):
         """Test that different seeds produce different results over many trials."""
@@ -111,7 +111,7 @@ class TestGeneratePhantomCases:
         different_count = len(cases1) != len(cases2)
         if not different_count and len(cases1) > 0:
             different_dates = any(
-                c1.referral_date != c2.referral_date or c1.court_station_id != c2.court_station_id
+                c1.referral_date != c2.referral_date or c1.court_station != c2.court_station
                 for c1, c2 in zip(cases1, cases2)
             )
             different_count = different_dates

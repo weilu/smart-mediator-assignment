@@ -15,7 +15,6 @@ Optional variants:
 ```bash
 uv sync --dev                  # development dependencies
 uv sync --extra gurobi         # Gurobi support
-uv sync --dev --extra gurobi   # dev + Gurobi
 ```
 
 Using pip (alternative):
@@ -103,6 +102,54 @@ results = get_recommendations_batch(
     generate_phantoms=True,
 )
 ```
+
+### VA Estimation (Batch)
+
+Estimate mediator Value Added from historical case data using absorbing regression with shrinkage:
+
+```python
+from smart_mediator_assignment import (
+    estimate_va,
+    VAEstimationConfig,
+)
+from smart_mediator_assignment.core.case import CaseProtocol
+
+# Cases must implement CaseProtocol
+# (compatible with Django Case model from cadaster-kenya-mediation)
+cases = get_historical_cases()  # Your data source
+
+# Configure estimation
+config = VAEstimationConfig(
+    reference_date=datetime.now(),
+    min_med_cases=2,
+    days_since_appt_threshold=180,
+)
+
+# Run estimation
+result = estimate_va(
+    cases=cases,
+    config=config,
+    start_date="2016-04-06",
+    end_date="2022-01-20",
+)
+
+# Access results
+va_dict = result.get_va_dict()  # {mediator_id: va}
+sigma = result.sigma            # Global sigma for belief initialization
+
+# Individual mediator estimates
+for med in result.mediator_vas:
+    print(f"Mediator {med.mediator_id}: VA={med.va:.4f}, cases={med.n_cases}")
+
+# Case-level predictions
+for case in result.case_predictions:
+    print(f"Case {case.case_id}: p_pred={case.p_pred:.4f}")
+```
+
+The unified `CaseProtocol` supports both LP assignment and VA estimation. Required properties:
+- `id`, `case_type`, `court_station`, `referral_date`, `p_value` (for assignment)
+- `mediator_id`, `case_outcome_agreement`, `mediator_appointment_date`, `conclusion_date` (for VA estimation)
+- `case_status`, `court_type`, `referral_mode` (for VA estimation)
 
 ## Testing
 

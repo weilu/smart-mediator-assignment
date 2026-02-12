@@ -7,6 +7,13 @@ from .strategies import (
     GroundTruthStrategy,
     get_strategy,
 )
+from .va_estimation import (
+    VAEstimationConfig,
+    MediatorVAEstimate,
+    CasePrediction,
+    VAEstimationResult,
+    estimate_va,
+)
 
 __all__ = [
     "compute_posterior",
@@ -19,4 +26,9 @@ __all__ = [
     "SampleStrategy",
     "GroundTruthStrategy",
     "get_strategy",
+    "VAEstimationConfig",
+    "MediatorVAEstimate",
+    "CasePrediction",
+    "VAEstimationResult",
+    "estimate_va",
 ]

@@ -21,6 +21,11 @@ from .algorithm import (
     update_belief_batch,
     generate_phantom_cases,
     get_strategy,
+    VAEstimationConfig,
+    MediatorVAEstimate,
+    CasePrediction,
+    VAEstimationResult,
+    estimate_va,
 )
 from .assignment import (
     MediatorRecommendation,
@@ -44,12 +49,18 @@ __all__ = [
     # Solver
     "LPSolver",
     "AssignmentDistribution",
-    # Algorithm
+    # Algorithm - Bayesian
     "compute_posterior",
     "update_belief",
     "update_belief_batch",
     "generate_phantom_cases",
     "get_strategy",
+    # Algorithm - VA Estimation
+    "VAEstimationConfig",
+    "MediatorVAEstimate",
+    "CasePrediction",
+    "VAEstimationResult",
+    "estimate_va",
     # Assignment
     "MediatorRecommendation",
     "RecommendationResult",

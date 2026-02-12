@@ -21,8 +21,8 @@ class TestLPSolver:
         """Test that a single case gets assigned to the only available mediator."""
         case = SimpleCase(
             id=1,
-            case_type_id="Family group",
-            court_station_id="MILIMANI",
+            case_type="Family group",
+            court_station="MILIMANI",
             referral_date=date(2023, 1, 1),
             p_value=0.5,
         )
@@ -49,8 +49,8 @@ class TestLPSolver:
         """Test assignment when multiple mediators are available."""
         case = SimpleCase(
             id=1,
-            case_type_id="Family group",
-            court_station_id="KAKAMEGA",
+            case_type="Family group",
+            court_station="KAKAMEGA",
             referral_date=date(2023, 1, 1),
             p_value=0.5,
         )
@@ -77,8 +77,8 @@ class TestLPSolver:
         cases = [
             SimpleCase(
                 id=i,
-                case_type_id="Family group",
-                court_station_id="KAKAMEGA",
+                case_type="Family group",
+                court_station="KAKAMEGA",
                 referral_date=date(2023, 1, 1),
                 p_value=0.5,
             )
@@ -107,8 +107,8 @@ class TestLPSolver:
         """Test assignment when mediators have existing case loads."""
         case = SimpleCase(
             id=1,
-            case_type_id="Family group",
-            court_station_id="KAKAMEGA",
+            case_type="Family group",
+            court_station="KAKAMEGA",
             referral_date=date(2023, 1, 1),
             p_value=0.5,
         )
@@ -134,8 +134,8 @@ class TestLPSolver:
         """Test case with no eligible mediators returns empty assignment."""
         case = SimpleCase(
             id=1,
-            case_type_id="Commercial Cases",
-            court_station_id="MILIMANI",
+            case_type="Commercial Cases",
+            court_station="MILIMANI",
             referral_date=date(2023, 1, 1),
             p_value=0.5,
         )
@@ -160,15 +160,15 @@ class TestLPSolver:
         cases = [
             SimpleCase(
                 id=1,
-                case_type_id="Family group",
-                court_station_id="MILIMANI",
+                case_type="Family group",
+                court_station="MILIMANI",
                 referral_date=date(2023, 1, 1),
                 p_value=0.5,
             ),
             SimpleCase(
                 id=2,
-                case_type_id="Family group",
-                court_station_id="KAKAMEGA",
+                case_type="Family group",
+                court_station="KAKAMEGA",
                 referral_date=date(2023, 1, 1),
                 p_value=0.5,
             ),
@@ -194,8 +194,8 @@ class TestLPSolver:
         """Test that phantom cases influence the assignment distribution."""
         real_case = SimpleCase(
             id=1,
-            case_type_id="Family group",
-            court_station_id="KAKAMEGA",
+            case_type="Family group",
+            court_station="KAKAMEGA",
             referral_date=date(2023, 1, 1),
             p_value=0.5,
         )
@@ -203,8 +203,8 @@ class TestLPSolver:
         phantom_cases = [
             SimpleCase(
                 id=-i,
-                case_type_id="Family group",
-                court_station_id="KAKAMEGA",
+                case_type="Family group",
+                court_station="KAKAMEGA",
                 referral_date=date(2023, 1, 2),
                 p_value=0.5,
             )
@@ -230,8 +230,8 @@ class TestLPSolver:
         """Test that optimal value is accessible after solving."""
         case = SimpleCase(
             id=1,
-            case_type_id="Family group",
-            court_station_id="KAKAMEGA",
+            case_type="Family group",
+            court_station="KAKAMEGA",
             referral_date=date(2023, 1, 1),
             p_value=0.5,
         )
@@ -257,8 +257,8 @@ class TestLPSolver:
         """Test that datetime objects work as well as date objects."""
         case = SimpleCase(
             id=1,
-            case_type_id="Family group",
-            court_station_id="MILIMANI",
+            case_type="Family group",
+            court_station="MILIMANI",
             referral_date=datetime(2023, 1, 1, 10, 30),
             p_value=0.5,
         )
