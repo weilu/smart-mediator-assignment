@@ -379,9 +379,9 @@ def test_commercial_and_tax_group_mapping():
         assert out.loc[0, "casetype_simplified"] == "Commercial and tax group"
 
 
-def _mk_prepared_case(cid, appt, outcome):
+def _mk_prepared_case(cid, appt, outcome, med=1):
     return SimpleCase(id=cid, case_type="Family group", court_station="MILIMANI",
-        referral_date=date(2021, 1, 1), p_value=0.5, mediator_id=1, case_outcome_agreement=outcome,
+        referral_date=date(2021, 1, 1), p_value=0.5, mediator_id=med, case_outcome_agreement=outcome,
         mediator_appointment_date=appt, conclusion_date=appt, case_status="CONCLUDED",
         court_type="Magistrate", referral_mode="Referred by Court")
 
@@ -406,20 +406,33 @@ def test_estimate_va_from_prepared_reuses_frame_on_subwindow():
 def test_estimate_va_from_prepared_matches_fresh_on_same_window():
     # Reuse on the SAME window the prepared frame was built from must reproduce the
     # fresh VA exactly: the fitted `df` (and thus mediator_vas) is identical either way.
-    cases = [_mk_prepared_case(i, date(2022, 1, 5 + i), i % 2) for i in range(6)]
+    #
+    # Needs >= 2 mediators with differing outcome rates: with a single mediator (or
+    # symmetric outcome rates across mediators) the half-split covariance used for
+    # shrinkage is degenerate and both paths silently produce NaN, which would make
+    # this assertion vacuous (NaN != NaN, or trivially true under an equal_nan
+    # escape hatch) instead of actually exercising _fit_and_score's arithmetic.
+    # Three mediators with distinct success rates (5/6, 2/6, 1/6 agreements) give a
+    # non-degenerate covariance and finite, distinct per-mediator VA.
+    outcomes = [1, 1, 1, 1, 1, 0,  0, 1, 0, 1, 0, 0,  0, 0, 0, 0, 0, 1]
+    meds =     [1, 1, 1, 1, 1, 1,  2, 2, 2, 2, 2, 2,  3, 3, 3, 3, 3, 3]
+    cases = [
+        _mk_prepared_case(i, date(2022, 1, 5 + i), outcomes[i], med=meds[i])
+        for i in range(18)
+    ]
     cfg = VAEstimationConfig(reference_date=datetime(2023, 6, 1), days_since_appt_threshold=0)
     fresh = estimate_va(cases, config=cfg, start_date="2021-01-01", end_date="2023-01-01")
     reused = estimate_va_from_prepared(fresh.prepared, config=cfg,
                                        start_date="2021-01-01", end_date="2023-01-01")
-    fresh_vas = fresh.get_va_dict()
-    reused_vas = reused.get_va_dict()
-    # NaN != NaN under Python equality, and this fixture's single-mediator/6-case
-    # window makes the shrinkage covariance degenerate (both paths produce NaN VA
-    # here) -- so compare keys plus np.isclose(equal_nan=True) rather than a plain
-    # dict `==`, per the brief's documented float-determinism fallback.
-    assert reused_vas.keys() == fresh_vas.keys()
-    for mediator_id, fresh_va in fresh_vas.items():
-        assert np.isclose(reused_vas[mediator_id], fresh_va, atol=1e-9, equal_nan=True)
+
+    assert np.isfinite(fresh.sigma)
+    assert all(np.isfinite(v) for v in fresh.get_va_dict().values())
+
+    assert reused.get_va_dict() == fresh.get_va_dict()
+    # p_pred is regression-derived (no shrinkage involved) and finite even for the
+    # degenerate single-mediator fixture used elsewhere in this file -- a strong,
+    # independent invariant that fresh and reuse agree case-by-case.
+    assert reused.get_p_pred_dict() == fresh.get_p_pred_dict()
 
 
 if __name__ == "__main__":
