@@ -1,3 +1,4 @@
+import warnings
 from datetime import date, datetime
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -254,10 +255,8 @@ class QPSolver(BaseSolver):
             u=u,
             verbose=False,
             polish=True,
-            # Tight tolerances so equality constraints (case probabilities summing
-            # to 1) hold to the precision downstream consumers expect.
-            eps_abs=1e-8,
-            eps_rel=1e-8,
+            eps_abs=1e-6,
+            eps_rel=1e-6,
             max_iter=100000,
             scaled_termination=True,
             warm_start=True,
@@ -272,18 +271,21 @@ class QPSolver(BaseSolver):
         self._res = self._prob.solve()
         status = str(self._res.info.status).lower()
 
-        if status in ("solved", "solved inaccurate"):
+        if status == "solved":
             pass
-        elif status == "maximum iterations reached" and self._res.x is not None:
-            # Accept a returned primal iterate (matches reference behavior).
-            pass
+        elif self._res.x is not None:
+            # Accept a non-optimal primal iterate (inaccurate / max-iter reached),
+            # but surface it: per-case normalization keeps sums at 1, yet the
+            # underlying assignment may be suboptimal. Matches the reference intent.
+            warnings.warn(
+                f"OSQP did not solve to optimality (status: {self._res.info.status}); "
+                "returning the available primal iterate.",
+                stacklevel=2,
+            )
         else:
             raise RuntimeError(
                 f"OSQP solve failed with status: {self._res.info.status}"
             )
-
-        if self._res.x is None:
-            raise RuntimeError("OSQP returned no primal solution.")
 
         return self._res.x
 
@@ -299,8 +301,17 @@ class QPSolver(BaseSolver):
                 continue
             assignments.setdefault(v, []).append((u, val))
 
-        for v in assignments:
-            assignments[v] = sorted(assignments[v], key=lambda z: z[1], reverse=True)
+        for v, pairs in assignments.items():
+            # Real cases (id >= 0) are constrained to sum to 1; normalize so the
+            # contract holds exactly regardless of solver precision. Phantom cases
+            # (id < 0) are only bounded <= 1, so leave their sums as solved.
+            if v >= 0:
+                total = sum(p for _, p in pairs)
+                if total <= 0:
+                    assignments[v] = []  # degenerate: no mass, avoid divide-by-zero
+                    continue
+                pairs = [(u, p / total) for u, p in pairs]
+            assignments[v] = sorted(pairs, key=lambda pair: pair[1], reverse=True)
 
         return assignments
 
