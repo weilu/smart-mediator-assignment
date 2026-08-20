@@ -51,9 +51,8 @@ def generate_phantom_cases(
     Returns:
         Tuple of (list of phantom cases, next available phantom ID)
     """
-    if seed is not None:
-        np.random.seed(seed)
-        random.seed(seed)
+    rng = np.random.default_rng(seed)
+    py_rng = random.Random(seed)
 
     phantom_id = starting_id
     phantom_cases_with_order = []
@@ -79,7 +78,7 @@ def generate_phantom_cases(
                 continue
 
             lambda_rate = avg_case_rate[case_type][court_station]
-            num_cases = np.random.poisson(lambda_rate)
+            num_cases = rng.poisson(lambda_rate)
 
             for _ in range(num_cases):
                 p_val_key = (case_type, court_station)
@@ -88,7 +87,7 @@ def generate_phantom_cases(
                 else:
                     p_val = default_p_val
 
-                order_key = random.uniform(0, 1)
+                order_key = py_rng.uniform(0, 1)
 
                 phantom_case = SimpleCase(
                     id=phantom_id,

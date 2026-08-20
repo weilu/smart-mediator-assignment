@@ -1,5 +1,6 @@
 import pytest
 from datetime import date, datetime
+import random
 
 import numpy as np
 
@@ -11,6 +12,14 @@ from tests.fixtures import (
     SCENARIO1_AVG_CASE_RATE,
     SCENARIO1_AVG_P_VAL,
     SCENARIO1_MED_BY_CRT_CASE_TYPE,
+)
+
+_ARGS = dict(
+    current_day=date(2023, 1, 1), time_horizon=5,
+    avg_case_rate={"Family group": {"MILIMANI": 2.0}},
+    avg_p_val_by_crt_case_type={("Family group", "MILIMANI"): 0.5},
+    med_by_court_case_type={"MILIMANI": {"Family group": [1, 2]}},
+    court_stations=["MILIMANI"], case_types=["Family group"],
 )
 
 
@@ -167,6 +176,18 @@ class TestGeneratePhantomCases:
         )
 
         assert len(phantom_cases) > 0
+
+    def test_same_seed_is_reproducible(self):
+        a, _ = generate_phantom_cases(**_ARGS, seed=7)
+        b, _ = generate_phantom_cases(**_ARGS, seed=7)
+        assert [(c.id, c.referral_date) for c in a] == [(c.id, c.referral_date) for c in b]
+
+    def test_does_not_disturb_global_rng(self):
+        np.random.seed(123); random.seed(123)
+        exp_np, exp_py = np.random.rand(), random.random()
+        np.random.seed(123); random.seed(123)
+        generate_phantom_cases(**_ARGS, seed=999)
+        assert np.random.rand() == exp_np and random.random() == exp_py
 
 
 class TestEstimateCaseArrivals:
