@@ -367,6 +367,21 @@ Expected: FAIL (or passes trivially today — keep as regression guard; the chan
 Mirror `VA_Antoine.py:177,229–247,330–408`:
 - Capture `df_case = df.copy()` immediately after the quasiyear block, before the `dropna(['mediator_id'])`/`case_days_med>=0`/pandemic/small-group drops.
 - Ensure `df_case` carries `casetype_simplified` (Task 4 helper runs before capture).
+- **CRITICAL — port the reference's step 4.1–4.3 backfill (VA_Antoine.py:229–247).** After the three small-group collapse steps (small mediators / court stations / case types) have run on `df`, and BEFORE merging params onto `df_case`, backfill the collapsed labels onto `df_case`. Without this, no `df_case` row is ever labeled `'zzzSmall'`, so the `zzzSmall` fillna never fires and small-station/small-casetype cases get a silently-zeroed coefficient (`skipna=True` sum) — biasing `p_pred`→residuals→VA for every mediator with small-station caseload. This is the fix for review findings 1–4.
+
+```python
+# 4.1 backfill small-group-collapsed labels onto df_case (only rows present in the fitted df)
+df_case = df_case.set_index('id')
+df_case.update(df.set_index('id')[['mediator_id', 'court_station', 'casetype_simplified']])
+df_case = df_case.reset_index()
+# 4.2 waiting-for-appointment cases (NaN quasiyear, non-pandemic) -> most-recent quasiyear
+qy_mask = df_case['quasiyear'].isna() & ~df_case['med_appt_date'].between(
+    config.pandemic_start, config.pandemic_end, inclusive="both")
+df_case.loc[qy_mask, 'quasiyear'] = df['quasiyear'].max()
+# 4.3 waiting-for-appointment cases -> reference month
+df_case.loc[df_case['appt_month'].isna(), 'appt_month'] = config.reference_date.month
+```
+
 - Compute `params_dict` as today from the fitted `df`, then merge param contributions onto `df_case` and:
 
 ```python
@@ -383,7 +398,9 @@ df['residuals'] = df['id'].map(df_case.set_index('id')['residuals'])
 ```
 
 - Apply the pending-outcome coercion (`days_since_appt > threshold & PENDING -> outcome 0`) to BOTH `df` and `df_case`; drop fresh-pending from `df` only.
-- Build `case_predictions` from `df_case` (all cases); keep `mediator_vas` from `df` (excludes `-999`).
+- Build `case_predictions` from `df_case` (all cases); keep `mediator_vas` from `df` (excludes `-999`). Because of the 4.1 backfill, `case_predictions` report the collapsed `mediator_id` (`-999` for small mediators), matching the reference.
+
+**Add a numeric regression test** (not just "not NaN") that fails on the pre-4.1 code and passes after: build cases so one court station falls below `min_court_station_cases` (collapsed to `zzzSmall`) while `MILIMANI` does not, and assert the small-station case's `court_station` contribution is applied — e.g. its `p_pred` equals that of a case natively grouped into `zzzSmall` with otherwise-identical covariates, OR (simpler) assert the small-station case's `p_pred` is finite AND that at least one `case_prediction`'s implied station coefficient is non-zero. The test MUST fail on the current HEAD (pre-fix) — verify that before implementing the backfill.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
