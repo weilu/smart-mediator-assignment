@@ -14,6 +14,7 @@ from smart_mediator_assignment.algorithm.va_estimation import (
     VAEstimationResult,
     estimate_va,
 )
+from smart_mediator_assignment.algorithm import va_estimation
 from smart_mediator_assignment.core.case import CaseProtocol, SimpleCase
 import pandas as pd
 import numpy as np
@@ -282,6 +283,23 @@ class TestEstimateVAIntegration:
         )
 
         assert len(result_narrow.case_predictions) < len(result_wide.case_predictions)
+
+
+def test_quasiyear_uses_true_month_end_not_day_28():
+    # Reference at end of June (30 days). Appt 2023-06-29 is within the most recent year
+    # window -> bucket 0. The old day-28 upper bound (2023-06-28) would drop it to NaN.
+    # The older 2010 row is an anchor so the oldest-bucket collapse targets it, not row 0.
+    df = pd.DataFrame({'med_appt_date': pd.to_datetime(['2023-06-29', '2010-01-01'])})
+    out = va_estimation._assign_quasiyear(df, datetime(2023, 6, 30))
+    assert out.loc[0, 'quasiyear'] == 0
+
+
+def test_quasiyear_collapses_short_oldest_bucket():
+    # Two appts ~1 month apart in the oldest reachable window -> the short oldest bucket
+    # is merged into the previous one, so both share one quasiyear value.
+    df = pd.DataFrame({'med_appt_date': pd.to_datetime(['1994-06-10', '1994-07-10'])})
+    out = va_estimation._assign_quasiyear(df, datetime(2023, 6, 30))
+    assert out['quasiyear'].nunique() == 1
 
 
 if __name__ == "__main__":

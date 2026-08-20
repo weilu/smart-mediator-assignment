@@ -9,6 +9,7 @@ characteristics, then applies shrinkage to produce stable VA estimates.
 from dataclasses import dataclass
 from datetime import datetime, date
 from typing import Union, Optional, List, Dict
+import calendar
 import pandas as pd
 import numpy as np
 
@@ -105,6 +106,40 @@ def _calculate_half_means(group: pd.DataFrame, mediator_id: int) -> pd.DataFrame
     return group
 
 
+def _assign_quasiyear(df: pd.DataFrame, reference_date) -> pd.DataFrame:
+    """Assign quasiyear and appt_month columns to cases based on appointment date.
+
+    Buckets appointments into roughly annual buckets using true calendar month-ends
+    (via calendar.monthrange) as boundaries. Collapses the oldest bucket into the
+    previous one when it spans < 365 days.
+
+    Args:
+        df: DataFrame with 'med_appt_date' column
+        reference_date: Reference date for bucketing
+
+    Returns:
+        DataFrame with added 'appt_month' and 'quasiyear' columns
+    """
+    df = df.copy()
+    df['appt_month'] = df['med_appt_date'].dt.month
+    df['quasiyear'] = np.nan
+    ref_month, ref_year = reference_date.month, reference_date.year
+    for t in range(31):
+        yu = ref_year - t
+        ub = datetime(yu, ref_month, calendar.monthrange(yu, ref_month)[1])
+        yl = ref_year - t - 1
+        lb = datetime(yl, ref_month, calendar.monthrange(yl, ref_month)[1])
+        df.loc[(df['med_appt_date'] <= ub) & (df['med_appt_date'] > lb), 'quasiyear'] = t
+    # collapse the oldest bucket into the previous one when it spans < 1 year
+    oldest_qy = df['quasiyear'].max()
+    if pd.notna(oldest_qy):
+        max_qy = df.loc[df['quasiyear'] == oldest_qy, 'med_appt_date'].max()
+        min_qy = df.loc[df['quasiyear'] == oldest_qy, 'med_appt_date'].min()
+        if pd.notna(max_qy) and (max_qy - min_qy).days < 365:
+            df.loc[df['quasiyear'] == oldest_qy, 'quasiyear'] -= 1
+    return df
+
+
 def estimate_va(
     cases: List[CaseProtocol],
     config: Optional[VAEstimationConfig] = None,
@@ -170,13 +205,7 @@ def estimate_va(
     df.loc[df['court_station'] == 'MILIMANI', 'court_station'] = 'AAAMilimani'
 
     # Generate quasi-year and month indicators
-    df['appt_month'] = df['med_appt_date'].dt.month
-    df['quasiyear'] = np.nan
-    for t in range(31):
-        ub = datetime(config.reference_date.year - t, config.reference_date.month, 28)
-        lb = datetime(config.reference_date.year - t - 1, config.reference_date.month, 28)
-        mask = (df['med_appt_date'] <= ub) & (df['med_appt_date'] > lb)
-        df.loc[mask, 'quasiyear'] = t
+    df = _assign_quasiyear(df, config.reference_date)
 
     # Drop invalid cases
     df = df.dropna(subset=['mediator_id'])
