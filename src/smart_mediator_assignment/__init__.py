@@ -14,7 +14,7 @@ from .core import (
     MediatorBelief,
     BeliefState,
 )
-from .solver import LPSolver, AssignmentDistribution
+from .solver import LPSolver, QPSolver, AssignmentDistribution
 from .algorithm import (
     compute_posterior,
     update_belief,
@@ -49,6 +49,7 @@ __all__ = [
     "BeliefState",
     # Solver
     "LPSolver",
+    "QPSolver",
     "AssignmentDistribution",
     # Algorithm - Bayesian
     "compute_posterior",

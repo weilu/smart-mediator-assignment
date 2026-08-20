@@ -22,10 +22,20 @@ from ..core.types import (
     CourtStationId,
     CaseTypeId,
 )
+from ..solver.base import BaseSolver
 from ..solver.lp_solver import LPSolver
 from ..algorithm.phantom import generate_phantom_cases
 from ..algorithm.strategies import get_strategy
 from ..config import AlgorithmConfig
+
+
+def _select_solver_cls(config: AlgorithmConfig) -> type[BaseSolver]:
+    """Pick the solver class per config; QPSolver requires the optional [qp] extra."""
+    if config.use_qp:
+        from ..solver.qp_solver import QPSolver
+
+        return QPSolver
+    return LPSolver
 
 
 @dataclass
@@ -96,7 +106,8 @@ def get_recommendations(
         if mid in va_estimates
     }
 
-    solver = LPSolver(
+    solver_cls = _select_solver_cls(config)
+    solver = solver_cls(
         valid_mediators=eligible_mediator_ids,
         mediator_case_loads=mediator_case_loads,
         capacity=config.capacity,
@@ -200,7 +211,8 @@ def get_recommendations_batch(
             seed=seed,
         )
 
-    solver = LPSolver(
+    solver_cls = _select_solver_cls(config)
+    solver = solver_cls(
         valid_mediators=eligible_mediator_ids,
         mediator_case_loads=mediator_case_loads,
         capacity=config.capacity,

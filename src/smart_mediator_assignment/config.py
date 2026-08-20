@@ -10,6 +10,7 @@ class AlgorithmConfig:
     lambda_penalty: float = 1.0
     time_horizon: int = 10
     use_gurobi: bool = False
+    use_qp: bool = False
 
     gurobi_access_id: Optional[str] = field(default=None, repr=False)
     gurobi_secret: Optional[str] = field(default=None, repr=False)
