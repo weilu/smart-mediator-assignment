@@ -77,6 +77,21 @@ def test_window_filters_on_appointment_date_not_referral():
     assert 1 in ids and 2 not in ids
 
 
+def _mk(cid, med, outcome):
+    return SimpleCase(id=cid, case_type="Family group", court_station="MILIMANI",
+        referral_date=date(2022, 1, 1), p_value=0.5, mediator_id=med, case_outcome_agreement=outcome,
+        mediator_appointment_date=date(2022, 1, 10), conclusion_date=date(2022, 2, 1),
+        case_status="CONCLUDED", court_type="Magistrate", referral_mode="Referred by Court")
+
+
+def test_p_pred_present_for_singleton_mediator_case():
+    cases = [_mk(1, 1, 1), _mk(2, 1, 0), _mk(3, 2, 1), _mk(4, 2, 0), _mk(99, 3, 1)]
+    cfg = VAEstimationConfig(reference_date=datetime(2023, 6, 1), days_since_appt_threshold=0, min_med_cases=2)
+    result = estimate_va(cases, config=cfg, start_date="2021-01-01", end_date="2023-01-01")
+    preds = {c.case_id: c.p_pred for c in result.case_predictions}
+    assert 99 in preds and preds[99] == preds[99]  # present and not NaN
+
+
 class TestVAEstimationConfig:
     """Test VAEstimationConfig."""
 

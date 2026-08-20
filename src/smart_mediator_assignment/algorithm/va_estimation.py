@@ -227,6 +227,11 @@ def estimate_va(
     # Generate quasi-year and month indicators
     df = _assign_quasiyear(df, config.reference_date)
 
+    # Case-level frame: captured before the "data issue" drops below, so cases
+    # excluded from the fit (missing mediator, pandemic period, singleton
+    # mediator/court-station/case-type groups) can still get a p_pred.
+    df_case = df.copy()
+
     # Drop invalid cases
     df = df.dropna(subset=['mediator_id'])
     df = df.dropna(subset=['med_appt_date'])
@@ -238,13 +243,16 @@ def estimate_va(
         config.pandemic_start, config.pandemic_end, inclusive="both"
     )]
 
-    # Filter by date range
+    # Filter by date range (a window, not a data-issue drop -> also applied to df_case)
     if start_date is not None and end_date is not None:
         df = df.loc[df['med_appt_date'].between(start_date, end_date, inclusive="left")]
+        df_case = df_case.loc[df_case['med_appt_date'].between(start_date, end_date, inclusive="left")]
     elif start_date is not None:
         df = df.loc[df['med_appt_date'] >= start_date]
+        df_case = df_case.loc[df_case['med_appt_date'] >= start_date]
     elif end_date is not None:
         df = df.loc[df['med_appt_date'] < end_date]
+        df_case = df_case.loc[df_case['med_appt_date'] < end_date]
 
     # Group small mediators
     concltotal = df[df['case_status'] == 'CONCLUDED'].groupby('mediator_id').size()
@@ -328,10 +336,16 @@ def estimate_va(
     params_dict['params_const']['case_outcome_agreement'] = 1
     params_dict['params_const'].loc[-1] = [0, params_dict['params_const']['const_val'].mean()]
 
-    # Handle pending cases
+    # Handle pending cases (applied to both frames; the fresh-pending drop is df-only
+    # since df_case must still carry every windowed case through to prediction)
     df.loc[
         (df['days_since_appt'] > config.pending_outcome_threshold_days) &
         (df['case_status'] == 'PENDING'),
+        'case_outcome_agreement'
+    ] = 0
+    df_case.loc[
+        (df_case['days_since_appt'] > config.pending_outcome_threshold_days) &
+        (df_case['case_status'] == 'PENDING'),
         'case_outcome_agreement'
     ] = 0
     df = df[~(
@@ -339,23 +353,36 @@ def estimate_va(
         (df['case_status'] == 'PENDING')
     )]
 
-    # Merge parameters to get predictions
-    df = df.merge(params_dict['params_appt_month'], on='appt_month', how='left')
-    df = df.merge(params_dict['params_quasiyear'], on='quasiyear', how='left')
-    df = df.merge(params_dict['params_casetype_simplified'], on='casetype_simplified', how='left')
-    df = df.merge(params_dict['params_court_station'], on='court_station', how='left')
-    df = df.merge(params_dict['params_referral_mode'], on='referral_mode', how='left')
-    df = df.merge(params_dict['params_highcourt'], on='highcourt', how='left')
-    df = df.merge(params_dict['params_courtofappeal'], on='courtofappeal', how='left')
-    df = df.merge(params_dict['params_const'], on='case_outcome_agreement', how='left')
+    # Merge parameters to get predictions over ALL cases (df_case), not just the
+    # fitted sample, so cases dropped above still get a p_pred.
+    df_case = df_case.merge(params_dict['params_appt_month'], on='appt_month', how='left')
+    df_case = df_case.merge(params_dict['params_quasiyear'], on='quasiyear', how='left')
+    df_case = df_case.merge(params_dict['params_casetype_simplified'], on='casetype_simplified', how='left')
+    df_case = df_case.merge(params_dict['params_court_station'], on='court_station', how='left')
+    df_case = df_case.merge(params_dict['params_referral_mode'], on='referral_mode', how='left')
+    df_case = df_case.merge(params_dict['params_highcourt'], on='highcourt', how='left')
+    df_case = df_case.merge(params_dict['params_courtofappeal'], on='courtofappeal', how='left')
+    df_case = df_case.merge(params_dict['params_const'], on='case_outcome_agreement', how='left')
 
     # Calculate predictions and residuals
-    df['p_pred'] = df[[
+    df_case['p_pred'] = df_case[[
         'appt_month_val', 'quasiyear_val', 'casetype_simplified_val',
         'court_station_val', 'referral_mode_val', 'highcourt_val',
         'courtofappeal_val', 'const_val'
     ]].sum(axis=1, skipna=True)
-    df['residuals'] = df['case_outcome_agreement'] - df['p_pred']
+
+    # court_station values grouped into 'zzzSmall' in df but absent from df_case
+    # (captured before that grouping) won't match a fitted category -> backfill.
+    small_mask = df_case['court_station'] == 'zzzSmall'
+    if small_mask.any():
+        cs_small_value = df_case.loc[small_mask, 'court_station_val'].iloc[0]
+        df_case['court_station_val'] = df_case['court_station_val'].fillna(cs_small_value)
+
+    df_case['residuals'] = df_case['case_outcome_agreement'] - df_case['p_pred']
+
+    # Map predictions/residuals back onto the fitted df for shrinkage/VA below
+    df['p_pred'] = df['id'].map(df_case.set_index('id')['p_pred'])
+    df['residuals'] = df['id'].map(df_case.set_index('id')['residuals'])
 
     # Calculate VA with shrinkage
     df['total_med_cases'] = df.groupby('mediator_id')['residuals'].transform('count')
@@ -411,15 +438,19 @@ def estimate_va(
         if row['mediator_id'] != -999
     ]
 
+    # VA is only defined for mediators in the fitted df; cases present only in
+    # df_case (dropped above for data issues) get NaN here.
+    df_case['va'] = df_case['id'].map(df.set_index('id')['va'])
+
     case_predictions = [
         CasePrediction(
             case_id=int(row['id']),
-            mediator_id=int(row['mediator_id']),
+            mediator_id=int(row['mediator_id']) if pd.notna(row['mediator_id']) else -999,
             p_pred=float(row['p_pred']),
             va=float(row['va']),
             case_outcome_agreement=int(row['case_outcome_agreement']) if pd.notna(row['case_outcome_agreement']) else None
         )
-        for _, row in df[['id', 'mediator_id', 'p_pred', 'va', 'case_outcome_agreement']].iterrows()
+        for _, row in df_case[['id', 'mediator_id', 'p_pred', 'va', 'case_outcome_agreement']].iterrows()
     ]
 
     return VAEstimationResult(
