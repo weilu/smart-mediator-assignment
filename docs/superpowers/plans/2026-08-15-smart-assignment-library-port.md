@@ -169,71 +169,88 @@ git commit -m "fix(va): filter estimation window by mediator_appointment_date (l
 
 ### Task 3: VA — quasiyear buckets use true month length + oldest-bucket collapse
 
-`main` uses `calendar.monthrange(year, month)[1]` for bucket bounds (vs hardcoded day-28) and collapses the oldest bucket into the previous one when it spans < 365 days.
+`main` uses `calendar.monthrange(year, month)[1]` for bucket bounds (vs hardcoded day-28) and collapses the oldest bucket into the previous one when it spans < 365 days. To make this directly testable (the day-28 bug does NOT raise — day 28 is always a valid date — so a "does not raise" test cannot discriminate old from new), extract the quasiyear logic into a helper, mirroring Task 4's `_simplify_case_types`.
 
 **Files:**
-- Modify: `src/smart_mediator_assignment/algorithm/va_estimation.py` (quasiyear loop, ~lines 172–179; add `import calendar`)
+- Modify: `src/smart_mediator_assignment/algorithm/va_estimation.py` (add `import calendar`; extract `_assign_quasiyear`; call it from `estimate_va` in place of the inline loop, ~lines 172–179)
 - Test: `tests/test_va_estimation.py` (add)
 
 **Interfaces:**
-- Produces: quasiyear boundaries anchored on the true last calendar day of `reference_date.month`; no `ValueError` for reference dates in 30-day months / Feb-29.
+- Produces: module-level `_assign_quasiyear(df, reference_date) -> df` that sets the `appt_month` and `quasiyear` columns, with bucket bounds anchored on the TRUE last calendar day of `reference_date.month` (via `calendar.monthrange`), and the oldest bucket collapsed into the previous one when it spans < 365 days.
 
 - [ ] **Step 1: Write the failing test**
 
+The discriminating behavior: a case appointed AFTER the 28th but on/before the true month-end of the reference month lands in the most-recent bucket (t=0) under monthrange bounds; under the old day-28 upper bound (`2023-06-28`) it falls past the bound and gets `quasiyear = NaN`.
+
 ```python
 # tests/test_va_estimation.py  (add)
-from datetime import datetime, date
-from smart_mediator_assignment import estimate_va, VAEstimationConfig
-from smart_mediator_assignment.core.case import SimpleCase
+import pandas as pd
+from datetime import datetime
+from smart_mediator_assignment.algorithm import va_estimation
 
-def test_estimate_va_runs_with_reference_in_february():
-    cases = [SimpleCase(id=i, case_type="Family group", court_station="MILIMANI",
-        referral_date=date(2022, 1, 1), p_value=0.5, mediator_id=1, case_outcome_agreement=i % 2,
-        mediator_appointment_date=date(2022, 2, 10), conclusion_date=date(2022, 3, 1),
-        case_status="CONCLUDED", court_type="Magistrate", referral_mode="Referred by Court")
-        for i in range(4)]
-    cfg = VAEstimationConfig(reference_date=datetime(2024, 2, 29), days_since_appt_threshold=0)
-    estimate_va(cases, config=cfg, start_date="2021-01-01", end_date="2023-01-01")  # must not raise
+def test_quasiyear_uses_true_month_end_not_day_28():
+    # Reference at end of June (30 days). Appt 2023-06-29 is within the most recent year
+    # window -> bucket 0. The old day-28 upper bound (2023-06-28) would drop it to NaN.
+    # The older 2010 row is an anchor so the oldest-bucket collapse targets it, not row 0.
+    df = pd.DataFrame({'med_appt_date': pd.to_datetime(['2023-06-29', '2010-01-01'])})
+    out = va_estimation._assign_quasiyear(df, datetime(2023, 6, 30))
+    assert out.loc[0, 'quasiyear'] == 0
+
+def test_quasiyear_collapses_short_oldest_bucket():
+    # Two appts ~1 month apart in the oldest reachable window -> the short oldest bucket
+    # is merged into the previous one, so both share one quasiyear value.
+    df = pd.DataFrame({'med_appt_date': pd.to_datetime(['1994-06-10', '1994-07-10'])})
+    out = va_estimation._assign_quasiyear(df, datetime(2023, 6, 30))
+    assert out['quasiyear'].nunique() == 1
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `uv run pytest tests/test_va_estimation.py::test_estimate_va_runs_with_reference_in_february -v`
-Expected: FAIL (day-28 anchoring mis-buckets / raises).
+Run: `uv run python -m pytest tests/test_va_estimation.py -k quasiyear -v`
+Expected: FAIL — `_assign_quasiyear` does not exist yet (AttributeError).
 
-- [ ] **Step 3: Implement the calendar-correct loop**
+- [ ] **Step 3: Implement the helper + wire it in**
 
-Add `import calendar` at top. Replace the quasiyear loop:
+Add `import calendar` at the top of `va_estimation.py`. Add the helper:
 
 ```python
-df['appt_month'] = df['med_appt_date'].dt.month
-df['quasiyear'] = np.nan
-ref_month, ref_year = config.reference_date.month, config.reference_date.year
-for t in range(31):
-    yu = ref_year - t
-    ub = datetime(yu, ref_month, calendar.monthrange(yu, ref_month)[1])
-    yl = ref_year - t - 1
-    lb = datetime(yl, ref_month, calendar.monthrange(yl, ref_month)[1])
-    df.loc[(df['med_appt_date'] <= ub) & (df['med_appt_date'] > lb), 'quasiyear'] = t
+def _assign_quasiyear(df: pd.DataFrame, reference_date) -> pd.DataFrame:
+    df = df.copy()
+    df['appt_month'] = df['med_appt_date'].dt.month
+    df['quasiyear'] = np.nan
+    ref_month, ref_year = reference_date.month, reference_date.year
+    for t in range(31):
+        yu = ref_year - t
+        ub = datetime(yu, ref_month, calendar.monthrange(yu, ref_month)[1])
+        yl = ref_year - t - 1
+        lb = datetime(yl, ref_month, calendar.monthrange(yl, ref_month)[1])
+        df.loc[(df['med_appt_date'] <= ub) & (df['med_appt_date'] > lb), 'quasiyear'] = t
+    # collapse the oldest bucket into the previous one when it spans < 1 year
+    oldest_qy = df['quasiyear'].max()
+    if pd.notna(oldest_qy):
+        max_qy = df.loc[df['quasiyear'] == oldest_qy, 'med_appt_date'].max()
+        min_qy = df.loc[df['quasiyear'] == oldest_qy, 'med_appt_date'].min()
+        if pd.notna(max_qy) and (max_qy - min_qy).days < 365:
+            df.loc[df['quasiyear'] == oldest_qy, 'quasiyear'] -= 1
+    return df
+```
 
-oldest_qy = df['quasiyear'].max()
-if pd.notna(oldest_qy):
-    max_qy = df.loc[df['quasiyear'] == oldest_qy, 'med_appt_date'].max()
-    min_qy = df.loc[df['quasiyear'] == oldest_qy, 'med_appt_date'].min()
-    if pd.notna(max_qy) and (max_qy - min_qy).days < 365:
-        df.loc[df['quasiyear'] == oldest_qy, 'quasiyear'] -= 1
+Replace the inline quasiyear block in `estimate_va` (the `df['appt_month'] = df['med_appt_date'].dt.month` line through the day-28 `for t in range(31)` loop) with:
+
+```python
+df = _assign_quasiyear(df, config.reference_date)
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `uv run pytest tests/test_va_estimation.py -k "february or recover" -v`
+Run: `uv run python -m pytest tests/test_va_estimation.py -k "quasiyear or recover" -v`, then the full suite `uv run python -m pytest -q`.
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/smart_mediator_assignment/algorithm/va_estimation.py tests/test_va_estimation.py
-git commit -m "fix(va): quasiyear buckets use calendar month length + collapse short oldest bucket"
+git commit -m "fix(va): quasiyear via calendar month-end helper + collapse short oldest bucket"
 ```
 
 ---
