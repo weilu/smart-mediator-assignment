@@ -561,7 +561,7 @@ def test_qp_solver_assigns_single_case():
     solver = QPSolver(capacity=3, lambda_penalty=1.0, time_horizon=10,
                       valid_mediators=[1, 2],
                       mediator_case_loads={1: 0, 2: 1},
-                      med_vas={1: 0.1, 2: -0.05},
+                      mediator_vas={1: 0.1, 2: -0.05},
                       med_by_court_case_type={"MILIMANI": {"Family group": [1, 2]}})
     case = SimpleCase(id=1, case_type="Family group", court_station="MILIMANI",
                       referral_date=date(2023, 1, 1), p_value=0.5)
@@ -576,7 +576,7 @@ def test_qp_solver_import_error_without_osqp():
     from smart_mediator_assignment import QPSolver
     with pytest.raises(ImportError, match="osqp"):
         QPSolver(capacity=3, lambda_penalty=1.0, time_horizon=10, valid_mediators=[1],
-                 mediator_case_loads={1: 0}, med_vas={1: 0.0},
+                 mediator_case_loads={1: 0}, mediator_vas={1: 0.0},
                  med_by_court_case_type={"MILIMANI": {"Family group": [1]}})
 ```
 
@@ -601,7 +601,7 @@ In `config.py`, add `use_qp: bool = False` to `AlgorithmConfig` (no extra valida
 
 - [ ] **Step 5: Implement `QPSolver`**
 
-Create `solver/qp_solver.py` with `class QPSolver(BaseSolver)`. Mirror `LPSolver.__init__`'s parameters (`capacity`, `lambda_penalty`, `time_horizon`, plus the per-instance `valid_mediators`, `mediator_case_loads`, `med_vas`, `med_by_court_case_type`, optional `phantom` args — match `LPSolver`'s exact constructor for drop-in parity). Lazy-import osqp at construction:
+Create `solver/qp_solver.py` with `class QPSolver(BaseSolver)`. Its `__init__` MUST match `LPSolver.__init__`'s signature EXACTLY for drop-in parity — same keyword args, same order: `valid_mediators, mediator_case_loads, capacity, mediator_vas, med_by_court_case_type, lambda_penalty, time_horizon, use_gurobi=False, config=None`. `QPSolver` accepts `use_gurobi` for signature parity but ignores it (OSQP is the backend). Store the same instance attributes `LPSolver` stores (`self.valid_mediators`, `self.mediator_case_loads`, `self.capacity`, `self.mediator_vas`, `self.med_by_court_case_type`, `self.lambda_penalty`, `self.time_horizon`). Lazy-import osqp at construction:
 
 ```python
 def __init__(self, ...):
@@ -619,20 +619,29 @@ Port the OSQP problem construction from `cadaster-algo/SlackedQPwithLoadOSQP.py`
 
 - [ ] **Step 6: Wire solver selection + export**
 
-In `recommender.py`, at both solver-construction sites (~lines 99 and 203), branch on config:
+In `recommender.py`, at BOTH solver-construction sites (`get_recommendations` ~line 99 and `get_recommendations_batch` ~line 203), select the class and construct with the IDENTICAL kwargs already used for `LPSolver` (since the signatures now match). Do not change the kwargs — only pick the class:
 
 ```python
+from ..solver.lp_solver import LPSolver
 if config.use_qp:
     from ..solver.qp_solver import QPSolver
-    solver = QPSolver(capacity=config.capacity, lambda_penalty=config.lambda_penalty,
-                      time_horizon=config.time_horizon, valid_mediators=eligible_mediator_ids,
-                      mediator_case_loads=mediator_case_loads, med_vas=va_estimates,
-                      med_by_court_case_type=med_by_court_case_type)
+    solver_cls = QPSolver
 else:
-    solver = LPSolver(...)  # unchanged
+    solver_cls = LPSolver
+solver = solver_cls(
+    valid_mediators=eligible_mediator_ids,
+    mediator_case_loads=mediator_case_loads,
+    capacity=config.capacity,
+    mediator_vas=filtered_vas,
+    med_by_court_case_type=med_by_court_case_type,
+    lambda_penalty=config.lambda_penalty,
+    time_horizon=config.time_horizon,
+    use_gurobi=config.use_gurobi,
+    config=config,
+)
 ```
 
-(Use the same argument values already passed to `LPSolver` at those sites.) In `__init__.py`, add `QPSolver` to imports and `__all__`.
+Apply the same change at the batch site (its local variable names for the VAs/loads may differ — use whatever it already passes to `LPSolver`). In `__init__.py`, add `QPSolver` to imports and `__all__`.
 
 - [ ] **Step 7: Run tests to verify they pass**
 
