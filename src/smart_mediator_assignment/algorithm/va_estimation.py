@@ -275,6 +275,23 @@ def estimate_va(
     df = df.merge(concltotal.rename('concltotal_ct'), on='casetype_simplified', how='left')
     df.loc[df['concltotal_ct'] < config.min_case_type_cases, 'casetype_simplified'] = 'zzzSmall'
 
+    # Backfill the small-group collapse (mediator_id/court_station/casetype_simplified ->
+    # -999/zzzSmall) onto df_case for rows that survived into the fitted df. Without this,
+    # no df_case row is ever labeled 'zzzSmall', so the zzzSmall param merge below never
+    # matches and small-station/small-casetype cases get their coefficient silently
+    # zeroed via skipna=True (VA_Antoine.py:229-235).
+    df_case = df_case.set_index('id')
+    df_case.update(df.set_index('id')[['mediator_id', 'court_station', 'casetype_simplified']])
+    df_case = df_case.reset_index()
+
+    # Waiting-for-appointment cases (no med_appt_date -> NaN quasiyear/appt_month from
+    # _assign_quasiyear) still need prediction covariates: bucket them into the most
+    # recent quasiyear/month so they get a p_pred instead of a silently-zeroed one.
+    qy_mask = df_case['quasiyear'].isna() & ~df_case['med_appt_date'].between(
+        config.pandemic_start, config.pandemic_end, inclusive="both")
+    df_case.loc[qy_mask, 'quasiyear'] = df['quasiyear'].max()
+    df_case.loc[df_case['appt_month'].isna(), 'appt_month'] = config.reference_date.month
+
     # Estimation dataset (cases appointed >= threshold days ago)
     df_estim = df[df['days_since_appt'] >= config.days_since_appt_threshold]
     df_estim = df_estim[[

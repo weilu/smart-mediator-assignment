@@ -92,6 +92,53 @@ def test_p_pred_present_for_singleton_mediator_case():
     assert 99 in preds and preds[99] == preds[99]  # present and not NaN
 
 
+def _station_case(cid, station, mediator, outcome):
+    # Fixing case_type/appt date/referral_mode/court_type/outcome to the fitted
+    # model's reference categories isolates court_station's own contribution to
+    # p_pred: any two such cases should differ only by their station coefficient.
+    return SimpleCase(id=cid, case_type="Divorce and Separation", court_station=station,
+        referral_date=date(2022, 1, 1), p_value=0.5, mediator_id=mediator, case_outcome_agreement=outcome,
+        mediator_appointment_date=date(2022, 1, 10), conclusion_date=date(2022, 2, 1),
+        case_status="CONCLUDED", court_type="Magistrate", referral_mode="Referred by Court")
+
+
+def test_small_court_station_coefficient_is_applied_not_zeroed():
+    """df_case must be relabeled 'zzzSmall' (backfilled from df) for stations collapsed
+    below min_court_station_cases, or the zzzSmall param merge never matches and the
+    station's coefficient is silently zeroed via skipna=True (VA_Antoine.py step 4.1)."""
+    cases = []
+    # 10 mediators x 2 MILIMANI cases each. Mediators 1 and 2 (which also sit at TINY,
+    # below) get outcome=0 at MILIMANI so their within-mediator jump to TINY's outcome=1
+    # is only explainable by court_station, not by their (absorbed) mediator fixed effect.
+    # Other mediators just add baseline variation for regression stability.
+    for m in range(1, 11):
+        milimani_outcome = 0 if m in (1, 2) else (1 if m <= 5 else 0)
+        cases.append(_station_case(100 + 2 * m, "MILIMANI", m, milimani_outcome))
+        cases.append(_station_case(101 + 2 * m, "MILIMANI", m, milimani_outcome))
+
+    # A station with only 2 concluded cases collapses to 'zzzSmall' (threshold below).
+    cases.append(_station_case(9001, "TINY", 1, outcome=1))
+    cases.append(_station_case(9002, "TINY", 2, outcome=1))
+
+    cfg = VAEstimationConfig(reference_date=datetime(2023, 6, 1), days_since_appt_threshold=0,
+                              min_med_cases=2, min_court_station_cases=2)
+    result = estimate_va(cases, config=cfg, start_date="2021-01-01", end_date="2023-01-01")
+    preds = {c.case_id: c.p_pred for c in result.case_predictions}
+
+    # Mediator 1's MILIMANI case shares every covariate with its TINY case except
+    # court_station (and the intercept term is keyed only on outcome=0/1, both mapped to
+    # the same single fitted intercept, so it cancels regardless). MILIMANI
+    # ('AAAMilimani') is the omitted reference category (coefficient 0 by construction),
+    # so any difference here is exactly TINY's zzzSmall contribution.
+    milimani_reference_p_pred = preds[100 + 2 * 1]
+    tiny_p_pred = preds[9001]
+
+    assert abs(tiny_p_pred - milimani_reference_p_pred) > 1e-6, (
+        f"small-station coefficient not applied: tiny={tiny_p_pred} vs "
+        f"milimani_reference={milimani_reference_p_pred}"
+    )
+
+
 class TestVAEstimationConfig:
     """Test VAEstimationConfig."""
 
