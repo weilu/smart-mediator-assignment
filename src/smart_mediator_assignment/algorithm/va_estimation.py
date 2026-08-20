@@ -120,8 +120,8 @@ def estimate_va(
     Args:
         cases: List of cases conforming to CaseProtocol
         config: Configuration for estimation (uses defaults if None)
-        start_date: Filter cases with referral_date >= start_date
-        end_date: Filter cases with referral_date < end_date
+        start_date: Filter cases with mediator_appointment_date >= start_date
+        end_date: Filter cases with mediator_appointment_date < end_date
 
     Returns:
         VAEstimationResult containing mediator VAs, case predictions, and sigma
@@ -181,7 +181,7 @@ def estimate_va(
     # Drop invalid cases
     df = df.dropna(subset=['mediator_id'])
     df = df.dropna(subset=['med_appt_date'])
-    df = df.dropna(subset=['referral_date'])
+    # df = df.dropna(subset=['referral_date'])
     df = df[df['case_days_med'] >= 0]
 
     # Exclude pandemic period
@@ -190,10 +190,12 @@ def estimate_va(
     )]
 
     # Filter by date range
-    if start_date is not None:
-        df = df.loc[df['referral_date'] >= start_date]
-    if end_date is not None:
-        df = df.loc[df['referral_date'] < end_date]
+    if start_date is not None and end_date is not None:
+        df = df.loc[df['med_appt_date'].between(start_date, end_date, inclusive="left")]
+    elif start_date is not None:
+        df = df.loc[df['med_appt_date'] >= start_date]
+    elif end_date is not None:
+        df = df.loc[df['med_appt_date'] < end_date]
 
     # Group small mediators
     concltotal = df[df['case_status'] == 'CONCLUDED'].groupby('mediator_id').size()

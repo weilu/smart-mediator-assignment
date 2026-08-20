@@ -14,7 +14,7 @@ from smart_mediator_assignment.algorithm.va_estimation import (
     VAEstimationResult,
     estimate_va,
 )
-from smart_mediator_assignment.core.case import CaseProtocol
+from smart_mediator_assignment.core.case import CaseProtocol, SimpleCase
 import pandas as pd
 import numpy as np
 
@@ -55,6 +55,25 @@ class TestCaseProtocol:
             referral_mode="Referred by Court",
         )
         assert isinstance(case, CaseProtocol)
+
+
+def _case(cid, appt, referral, outcome=1, mediator_id=1):
+    return SimpleCase(id=cid, case_type="Family group", court_station="MILIMANI",
+        referral_date=referral, p_value=0.5, mediator_id=mediator_id, case_outcome_agreement=outcome,
+        mediator_appointment_date=appt, conclusion_date=appt, case_status="CONCLUDED",
+        court_type="Magistrate", referral_mode="Referred by Court")
+
+
+def test_window_filters_on_appointment_date_not_referral():
+    inside = _case(1, appt=date(2022, 6, 1), referral=date(2019, 1, 1))
+    outside = _case(2, appt=date(2018, 1, 1), referral=date(2022, 6, 1))
+    # Add more cases for regression stability
+    padding = [_case(cid, appt=date(2022, 6, 1), referral=date(2022, 1, 1), mediator_id=2+i)
+               for i, cid in enumerate(range(3, 35))]
+    cfg = VAEstimationConfig(reference_date=datetime(2023, 6, 1), days_since_appt_threshold=0)
+    result = estimate_va([inside, outside] + padding, config=cfg, start_date="2022-01-01", end_date="2023-01-01")
+    ids = {c.case_id for c in result.case_predictions}
+    assert 1 in ids and 2 not in ids
 
 
 class TestVAEstimationConfig:
