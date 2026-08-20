@@ -63,6 +63,9 @@ class VAEstimationResult:
     mediator_vas: List[MediatorVAEstimate]
     case_predictions: List[CasePrediction]
     sigma: float
+    # Clean, collapsed, pre-fit frame -- reusable as the input to
+    # estimate_va_from_prepared for incremental refresh without re-cleaning.
+    prepared: Optional[pd.DataFrame] = None
 
     def get_va_dict(self) -> Dict[MediatorId, float]:
         """Return VA estimates as dictionary."""
@@ -187,11 +190,9 @@ def estimate_va(
         end_date: Filter cases with mediator_appointment_date < end_date
 
     Returns:
-        VAEstimationResult containing mediator VAs, case predictions, and sigma
+        VAEstimationResult containing mediator VAs, case predictions, sigma,
+        and the reusable `prepared` frame (see estimate_va_from_prepared).
     """
-    import statsmodels.api as sm
-    from linearmodels.iv import absorbing
-
     if config is None:
         config = VAEstimationConfig.default()
 
@@ -275,6 +276,11 @@ def estimate_va(
     df = df.merge(concltotal.rename('concltotal_ct'), on='casetype_simplified', how='left')
     df.loc[df['concltotal_ct'] < config.min_case_type_cases, 'casetype_simplified'] = 'zzzSmall'
 
+    # Clean, collapsed, pre-fit frame -- captured before df_case's label backfill
+    # below and before _fit_and_score mutates df, so it can be reused verbatim by
+    # estimate_va_from_prepared for incremental refresh.
+    prepared_frame = df.copy()
+
     # Backfill the small-group collapse (mediator_id/court_station/casetype_simplified ->
     # -999/zzzSmall) onto df_case for rows that survived into the fitted df. Without this,
     # no df_case row is ever labeled 'zzzSmall', so the zzzSmall param merge below never
@@ -291,6 +297,69 @@ def estimate_va(
         config.pandemic_start, config.pandemic_end, inclusive="both")
     df_case.loc[qy_mask, 'quasiyear'] = df['quasiyear'].max()
     df_case.loc[df_case['appt_month'].isna(), 'appt_month'] = config.reference_date.month
+
+    result = _fit_and_score(df, df_case, config)
+    result.prepared = prepared_frame
+    return result
+
+
+def estimate_va_from_prepared(
+    prepared: pd.DataFrame,
+    config: Optional[VAEstimationConfig] = None,
+    start_date: Optional[Union[str, datetime]] = None,
+    end_date: Optional[Union[str, datetime]] = None,
+) -> VAEstimationResult:
+    """
+    Re-estimate mediator VA from a previously prepared (cleaned, collapsed) frame.
+
+    Skips the cleaning pipeline entirely -- `prepared` must be a frame produced
+    by `estimate_va` (i.e. `result.prepared`). Filters by both `med_appt_date`
+    and `concl_date` within `[start_date, end_date)`, since a growing window's
+    conclusion dates lag appointment dates.
+
+    Args:
+        prepared: Clean, collapsed frame from a prior `estimate_va` call
+        config: Configuration for estimation (uses defaults if None)
+        start_date: Filter cases with med_appt_date/concl_date >= start_date
+        end_date: Filter cases with med_appt_date/concl_date < end_date
+
+    Returns:
+        VAEstimationResult containing mediator VAs, case predictions, sigma,
+        and `prepared` set to the input frame (unchanged, for further reuse).
+    """
+    if config is None:
+        config = VAEstimationConfig.default()
+
+    if isinstance(start_date, str):
+        start_date = datetime.strptime(start_date, '%Y-%m-%d')
+    if isinstance(end_date, str):
+        end_date = datetime.strptime(end_date, '%Y-%m-%d')
+
+    df = prepared.loc[
+        prepared['med_appt_date'].between(start_date, end_date, inclusive="left")
+        & prepared['concl_date'].between(start_date, end_date, inclusive="left")
+    ].copy()
+    # Labels already collapsed in `prepared` -- unlike the fresh path, no 4.1 backfill here.
+    df_case = df.copy()
+
+    result = _fit_and_score(df, df_case, config)
+    result.prepared = prepared
+    return result
+
+
+def _fit_and_score(
+    df: pd.DataFrame,
+    df_case: pd.DataFrame,
+    config: VAEstimationConfig,
+) -> VAEstimationResult:
+    """
+    Shared core: regression, prediction, and shrinkage over an already-cleaned frame.
+
+    Shared by estimate_va (fresh path) and estimate_va_from_prepared (reuse path).
+    Does NOT set `.prepared` -- each entry point sets it after calling this.
+    """
+    import statsmodels.api as sm
+    from linearmodels.iv import absorbing
 
     # Estimation dataset (cases appointed >= threshold days ago)
     df_estim = df[df['days_since_appt'] >= config.days_since_appt_threshold]

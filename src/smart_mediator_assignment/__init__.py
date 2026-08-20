@@ -26,6 +26,7 @@ from .algorithm import (
     CasePrediction,
     VAEstimationResult,
     estimate_va,
+    estimate_va_from_prepared,
 )
 from .assignment import (
     MediatorRecommendation,
@@ -61,6 +62,7 @@ __all__ = [
     "CasePrediction",
     "VAEstimationResult",
     "estimate_va",
+    "estimate_va_from_prepared",
     # Assignment
     "MediatorRecommendation",
     "RecommendationResult",

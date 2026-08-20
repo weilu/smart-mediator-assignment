@@ -13,6 +13,7 @@ from .va_estimation import (
     CasePrediction,
     VAEstimationResult,
     estimate_va,
+    estimate_va_from_prepared,
 )
 
 __all__ = [
@@ -31,4 +32,5 @@ __all__ = [
     "CasePrediction",
     "VAEstimationResult",
     "estimate_va",
+    "estimate_va_from_prepared",
 ]

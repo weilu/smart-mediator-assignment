@@ -13,6 +13,7 @@ from smart_mediator_assignment.algorithm.va_estimation import (
     CasePrediction,
     VAEstimationResult,
     estimate_va,
+    estimate_va_from_prepared,
 )
 from smart_mediator_assignment.algorithm import va_estimation
 from smart_mediator_assignment.core.case import CaseProtocol, SimpleCase
@@ -376,6 +377,49 @@ def test_commercial_and_tax_group_mapping():
     for ct in ("Commercial Cases", "Tax Appeals"):
         out = va_estimation._simplify_case_types(_df(ct))
         assert out.loc[0, "casetype_simplified"] == "Commercial and tax group"
+
+
+def _mk_prepared_case(cid, appt, outcome):
+    return SimpleCase(id=cid, case_type="Family group", court_station="MILIMANI",
+        referral_date=date(2021, 1, 1), p_value=0.5, mediator_id=1, case_outcome_agreement=outcome,
+        mediator_appointment_date=appt, conclusion_date=appt, case_status="CONCLUDED",
+        court_type="Magistrate", referral_mode="Referred by Court")
+
+
+def test_estimate_va_returns_prepared_frame():
+    cases = [_mk_prepared_case(i, date(2022, 1, 5 + i), i % 2) for i in range(6)]
+    cfg = VAEstimationConfig(reference_date=datetime(2023, 6, 1), days_since_appt_threshold=0)
+    result = estimate_va(cases, config=cfg, start_date="2021-01-01", end_date="2023-01-01")
+    assert result.prepared is not None
+
+
+def test_estimate_va_from_prepared_reuses_frame_on_subwindow():
+    cases = [_mk_prepared_case(i, date(2022, 1, 5 + i), i % 2) for i in range(6)]
+    cfg = VAEstimationConfig(reference_date=datetime(2023, 6, 1), days_since_appt_threshold=0)
+    prepared = estimate_va(cases, config=cfg, start_date="2021-01-01", end_date="2023-01-01").prepared
+    second = estimate_va_from_prepared(prepared, config=cfg,
+                                       start_date="2022-01-01", end_date="2022-01-08")
+    ids = {c.case_id for c in second.case_predictions}
+    assert ids and ids.issubset({0, 1, 2})
+
+
+def test_estimate_va_from_prepared_matches_fresh_on_same_window():
+    # Reuse on the SAME window the prepared frame was built from must reproduce the
+    # fresh VA exactly: the fitted `df` (and thus mediator_vas) is identical either way.
+    cases = [_mk_prepared_case(i, date(2022, 1, 5 + i), i % 2) for i in range(6)]
+    cfg = VAEstimationConfig(reference_date=datetime(2023, 6, 1), days_since_appt_threshold=0)
+    fresh = estimate_va(cases, config=cfg, start_date="2021-01-01", end_date="2023-01-01")
+    reused = estimate_va_from_prepared(fresh.prepared, config=cfg,
+                                       start_date="2021-01-01", end_date="2023-01-01")
+    fresh_vas = fresh.get_va_dict()
+    reused_vas = reused.get_va_dict()
+    # NaN != NaN under Python equality, and this fixture's single-mediator/6-case
+    # window makes the shrinkage covariance degenerate (both paths produce NaN VA
+    # here) -- so compare keys plus np.isclose(equal_nan=True) rather than a plain
+    # dict `==`, per the brief's documented float-determinism fallback.
+    assert reused_vas.keys() == fresh_vas.keys()
+    for mediator_id, fresh_va in fresh_vas.items():
+        assert np.isclose(reused_vas[mediator_id], fresh_va, atol=1e-9, equal_nan=True)
 
 
 if __name__ == "__main__":

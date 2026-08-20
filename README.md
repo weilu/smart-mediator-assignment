@@ -110,6 +110,7 @@ Estimate mediator Value Added from historical case data using absorbing regressi
 ```python
 from smart_mediator_assignment import (
     estimate_va,
+    estimate_va_from_prepared,
     VAEstimationConfig,
 )
 from smart_mediator_assignment.core.case import CaseProtocol
@@ -144,6 +145,20 @@ for med in result.mediator_vas:
 # Case-level predictions
 for case in result.case_predictions:
     print(f"Case {case.case_id}: p_pred={case.p_pred:.4f}")
+```
+
+`estimate_va` always populates `result.prepared` with the cleaned, collapsed frame it fit
+on. For incremental refresh (e.g. re-estimating on a growing window every few days), reuse
+that frame with `estimate_va_from_prepared` to skip re-cleaning the raw cases:
+
+```python
+# Re-estimate on a wider window without re-cleaning the raw cases
+refreshed = estimate_va_from_prepared(
+    result.prepared,
+    config=config,
+    start_date="2016-04-06",
+    end_date="2022-02-01",
+)
 ```
 
 The unified `CaseProtocol` supports both LP assignment and VA estimation. Required properties:
