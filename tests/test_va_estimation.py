@@ -302,5 +302,19 @@ def test_quasiyear_collapses_short_oldest_bucket():
     assert out['quasiyear'].nunique() == 1
 
 
+def _df(ct):
+    c = SimpleCase(id=1, case_type=ct, court_station="MILIMANI", referral_date=date(2022,1,1),
+        p_value=0.5, mediator_id=1, case_outcome_agreement=1,
+        mediator_appointment_date=date(2022,1,1), conclusion_date=date(2022,2,1),
+        case_status="CONCLUDED", court_type="Magistrate", referral_mode="Referred by Court")
+    return va_estimation._cases_to_dataframe([c])
+
+
+def test_commercial_and_tax_group_mapping():
+    for ct in ("Commercial Cases", "Tax Appeals"):
+        out = va_estimation._simplify_case_types(_df(ct))
+        assert out.loc[0, "casetype_simplified"] == "Commercial and tax group"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -106,6 +106,34 @@ def _calculate_half_means(group: pd.DataFrame, mediator_id: int) -> pd.DataFrame
     return group
 
 
+def _simplify_case_types(df: pd.DataFrame) -> pd.DataFrame:
+    """Simplify case types into broader groupings for regression.
+
+    Maps individual case types into simplified categories:
+    - Civil Cases, Civil Appeals -> Civil group
+    - Divorce and Separation, Family Appeals, Family Miscellaneous,
+      Succession (Probate & Administration - P&A) -> AAAFamily group (reference)
+    - Commercial Cases, Tax Appeals -> Commercial and tax group
+    - All others retain original case_type
+
+    Args:
+        df: DataFrame with 'case_type' column
+
+    Returns:
+        DataFrame with added 'casetype_simplified' column
+    """
+    df = df.copy()
+    df['casetype_simplified'] = df['case_type']
+    df.loc[df['case_type'].isin(['Civil Cases', 'Civil Appeals']), 'casetype_simplified'] = 'Civil group'
+    df.loc[df['case_type'].isin([
+        'Divorce and Separation', 'Family Appeals', 'Family Miscellaneous',
+        'Succession (Probate & Administration - P&A)'
+    ]), 'casetype_simplified'] = 'AAAFamily group'
+    df.loc[df['case_type'].isin(['Commercial Cases', 'Tax Appeals']),
+           'casetype_simplified'] = 'Commercial and tax group'
+    return df
+
+
 def _assign_quasiyear(df: pd.DataFrame, reference_date) -> pd.DataFrame:
     """Assign quasiyear and appt_month columns to cases based on appointment date.
 
@@ -187,15 +215,7 @@ def estimate_va(
         (config.reference_date - df['med_appt_date']).dt.days
 
     # Simplify case types (Family group as reference)
-    df['casetype_simplified'] = df['case_type']
-    family_types = ['Civil Cases', 'Civil Appeals']
-    df.loc[df['case_type'].isin(family_types), 'casetype_simplified'] = 'Civil group'
-
-    family_group_types = [
-        'Divorce and Separation', 'Family Appeals', 'Family Miscellaneous',
-        'Succession (Probate & Administration - P&A)'
-    ]
-    df.loc[df['case_type'].isin(family_group_types), 'casetype_simplified'] = 'AAAFamily group'
+    df = _simplify_case_types(df)
 
     # Court indicators
     df['highcourt'] = (df['court_type'] == 'High Court').astype(int)
