@@ -429,7 +429,7 @@ The dry-run re-estimates VA on a growing window every 7 days. `main` supports th
   - `estimate_va(cases, config=None, start_date=None, end_date=None) -> VAEstimationResult` (signature unchanged; now always populates `result.prepared`).
   - `estimate_va_from_prepared(prepared, config=None, start_date=None, end_date=None) -> VAEstimationResult` (new; skips cleaning; filters the prepared frame by `med_appt_date` AND `concl_date` within `[start, end)`).
   - `VAEstimationResult.prepared: Optional[pd.DataFrame] = None` (the cleaned frame).
-  - Both delegate to a private `_fit_and_score(df, df_case, config) -> VAEstimationResult` holding the shared regression → prediction → shrinkage core. No sentinel/`None`-guard on `estimate_va`.
+  - Both delegate to a private `_fit_and_score(df, df_case, config) -> VAEstimationResult` holding the shared core: pending-outcome coercion (on both `df` and `df_case`) → regression → param merge/prediction/`zzzSmall` fillna → residuals → map back to `df` → shrinkage → build results. `_fit_and_score` does NOT set `.prepared`; each entry point sets it after the call. The Task-5 `df_case` 4.1–4.3 label backfill stays in `estimate_va` (fresh path only) — the reuse path's `df_case = df.copy()` already carries collapsed labels inherited from the prepared frame, so it must NOT re-run 4.1. No sentinel/`None`-guard on `estimate_va`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -469,8 +469,17 @@ Expected: FAIL — `estimate_va_from_prepared` not defined / `prepared` field mi
 - [ ] **Step 3: Implement the split**
 
 - Add `prepared: Optional[pd.DataFrame] = None` to `VAEstimationResult`.
-- Extract the regression → prediction → shrinkage core (everything after cleaning) into `_fit_and_score(df, df_case, config) -> VAEstimationResult`, and have it set `result.prepared = df` (the cleaned frame).
-- `estimate_va(cases, config, start_date, end_date)`: run `_cases_to_dataframe` + the cleaning pipeline (Tasks 2–5) to produce `df` and `df_case`, then `return _fit_and_score(df, df_case, config)`.
+- Extract into `_fit_and_score(df, df_case, config) -> VAEstimationResult` the shared core: the pending-outcome coercion (both frames), the `df_estim` regression, `params_dict`, the param merge onto `df_case`, the `zzzSmall` fillna, residuals, map-back to `df`, shrinkage, and result assembly. It returns the result WITHOUT setting `.prepared`. Do NOT put the `df_case` 4.1–4.3 backfill inside `_fit_and_score`.
+- `estimate_va(cases, config, start_date, end_date)`: `_cases_to_dataframe` → the cleaning pipeline (Tasks 2–5: type coercion, simplify, court indicators, quasiyear, drops, window filter, small-group collapse) producing `df` (fitted frame) and `df_case` (fuller frame captured before drops). Then, in this order:
+
+```python
+prepared_frame = df.copy()              # clean, collapsed, pre-fit — this is the reusable frame
+# ... existing Task-5 4.1-4.3 df_case backfill (fresh path only) ...
+result = _fit_and_score(df, df_case, config)
+result.prepared = prepared_frame
+return result
+```
+
 - `estimate_va_from_prepared(prepared, config, start_date, end_date)`: coerce `start_date`/`end_date` (reuse the existing str→datetime helper), then:
 
 ```python
@@ -478,11 +487,28 @@ df = prepared.loc[
     prepared['med_appt_date'].between(start_date, end_date, inclusive="left")
     & prepared['concl_date'].between(start_date, end_date, inclusive="left")
 ].copy()
-df_case = df.copy()
-return _fit_and_score(df, df_case, config)
+df_case = df.copy()                     # labels already collapsed in `prepared`; no 4.1 backfill here
+result = _fit_and_score(df, df_case, config)
+result.prepared = prepared
+return result
 ```
 
 - In `__init__.py`, add `estimate_va_from_prepared` to imports and `__all__`.
+- Add a third test asserting the fresh and reuse paths agree on a shared window, so the split is behavior-preserving:
+
+```python
+def test_estimate_va_from_prepared_matches_fresh_on_same_window():
+    # Reuse on the SAME window the prepared frame was built from must reproduce the
+    # fresh VA exactly: the fitted `df` (and thus mediator_vas) is identical either way.
+    cases = [_mk(i, date(2022,1,5+i), i % 2) for i in range(6)]
+    cfg = VAEstimationConfig(reference_date=datetime(2023,6,1), days_since_appt_threshold=0)
+    fresh = estimate_va(cases, config=cfg, start_date="2021-01-01", end_date="2023-01-01")
+    reused = estimate_va_from_prepared(fresh.prepared, config=cfg,
+                                       start_date="2021-01-01", end_date="2023-01-01")
+    assert reused.get_va_dict() == fresh.get_va_dict()
+```
+
+Note: use the SAME window for the fresh call, the prepared frame, and the reuse call — the invariant is that reuse on the identical window reproduces the fresh VA (a sub-window would legitimately differ because the cached small-group collapse population differs). If exact float equality proves fragile, compare keys equal and per-mediator VA within `1e-9`, and record why in the report.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
