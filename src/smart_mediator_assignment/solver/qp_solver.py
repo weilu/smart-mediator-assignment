@@ -311,29 +311,37 @@ class QPSolver(BaseSolver):
 
         env = self._make_gurobi_env()
         m = gp.Model(env=env) if env is not None else gp.Model()
-        m.Params.OutputFlag = 0
+        # Dispose the model (and WLS env) after every solve so a caller looping
+        # over many cases with a cloud/WLS license doesn't leak a licensed session
+        # per solve. z.X is materialized into an owned array before disposal.
+        try:
+            m.Params.OutputFlag = 0
 
-        z = m.addMVar(self._n_var, lb=-GRB.INFINITY, ub=GRB.INFINITY)
-        m.setObjective(0.5 * (z @ P @ z) + q @ z, GRB.MINIMIZE)
+            z = m.addMVar(self._n_var, lb=-GRB.INFINITY, ub=GRB.INFINITY)
+            m.setObjective(0.5 * (z @ P @ z) + q @ z, GRB.MINIMIZE)
 
-        # np.inf is not a valid Gurobi bound; GRB.INFINITY is its sentinel.
-        u_g = np.where(np.isposinf(u), GRB.INFINITY, u)
-        l_g = np.where(np.isneginf(l), -GRB.INFINITY, l)
-        m.addConstr(A @ z <= u_g)
-        m.addConstr(A @ z >= l_g)
+            # np.inf is not a valid Gurobi bound; GRB.INFINITY is its sentinel.
+            u_g = np.where(np.isposinf(u), GRB.INFINITY, u)
+            l_g = np.where(np.isneginf(l), -GRB.INFINITY, l)
+            m.addConstr(A @ z <= u_g)
+            m.addConstr(A @ z >= l_g)
 
-        m.optimize()
+            m.optimize()
 
-        if m.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
-            raise RuntimeError(f"Gurobi solve failed with status: {m.Status}")
-        if m.Status == GRB.SUBOPTIMAL:
-            warnings.warn(
-                f"Gurobi did not solve to optimality (status: {m.Status}); "
-                "returning the available primal iterate.",
-                stacklevel=2,
-            )
+            if m.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
+                raise RuntimeError(f"Gurobi solve failed with status: {m.Status}")
+            if m.Status == GRB.SUBOPTIMAL:
+                warnings.warn(
+                    f"Gurobi did not solve to optimality (status: {m.Status}); "
+                    "returning the available primal iterate.",
+                    stacklevel=2,
+                )
 
-        return np.asarray(z.X, dtype=float)
+            return np.array(z.X, dtype=float)
+        finally:
+            m.dispose()
+            if env is not None:
+                env.close()
 
     def _solve_model(self) -> np.ndarray:
         """Run OSQP and return the primal result vector."""
