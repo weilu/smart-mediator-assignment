@@ -4,6 +4,7 @@ from datetime import date
 from smart_mediator_assignment import SimpleCase, AlgorithmConfig
 
 osqp_missing = importlib.util.find_spec("osqp") is None
+gurobi_missing = importlib.util.find_spec("gurobipy") is None
 
 
 def test_config_defaults_to_lp():
@@ -105,3 +106,45 @@ def test_qp_solver_import_error_without_osqp():
         QPSolver(capacity=3, lambda_penalty=1.0, time_horizon=10, valid_mediators=[1],
                  mediator_case_loads={1: 0}, mediator_vas={1: 0.0},
                  med_by_court_case_type={"MILIMANI": {"Family group": [1]}})
+
+
+@pytest.mark.skipif(not gurobi_missing, reason="gurobipy installed")
+def test_qp_solver_gurobi_import_error_without_gurobipy():
+    from smart_mediator_assignment import QPSolver
+    with pytest.raises(ImportError, match="gurobi"):
+        QPSolver(capacity=3, lambda_penalty=1.0, time_horizon=10, valid_mediators=[1],
+                 mediator_case_loads={1: 0}, mediator_vas={1: 0.0},
+                 med_by_court_case_type={"MILIMANI": {"Family group": [1]}},
+                 use_gurobi=True)
+
+
+@pytest.mark.skipif(gurobi_missing, reason="gurobipy extra not installed")
+@pytest.mark.skipif(osqp_missing, reason="osqp extra not installed")
+def test_qp_gurobi_matches_osqp():
+    # Convex QP: Gurobi (paper's original solver) and OSQP must reach the same
+    # optimum. Requires a Gurobi license, so this is skipped where none exists.
+    from smart_mediator_assignment import QPSolver
+    kwargs = dict(capacity=3, lambda_penalty=1.0, time_horizon=10,
+                  valid_mediators=[1, 2],
+                  mediator_case_loads={1: 0, 2: 1},
+                  mediator_vas={1: 0.1, 2: -0.05},
+                  med_by_court_case_type={"MILIMANI": {"Family group": [1, 2]}})
+    case = SimpleCase(id=1, case_type="Family group", court_station="MILIMANI",
+                      referral_date=date(2023, 1, 1), p_value=0.5)
+
+    try:
+        gp_dist = QPSolver(use_gurobi=True, **kwargs).solve(
+            [case], phantom_cases=[], current_day=date(2023, 1, 1))
+    except Exception as e:  # noqa: BLE001
+        if "license" in str(e).lower() or "size-limited" in str(e).lower():
+            pytest.skip(f"Gurobi license unavailable: {e}")
+        raise
+    osqp_dist = QPSolver(use_gurobi=False, **kwargs).solve(
+        [case], phantom_cases=[], current_day=date(2023, 1, 1))
+
+    assert gp_dist[1][0][0] == osqp_dist[1][0][0]  # same top mediator
+    gp_probs = dict(gp_dist[1])
+    osqp_probs = dict(osqp_dist[1])
+    assert gp_probs.keys() == osqp_probs.keys()
+    for med, p in gp_probs.items():
+        assert abs(p - osqp_probs[med]) < 1e-4

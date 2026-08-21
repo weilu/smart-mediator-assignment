@@ -13,21 +13,25 @@ from ..config import AlgorithmConfig
 
 class QPSolver(BaseSolver):
     """
-    Quadratic Programming solver for mediator assignment, backed by OSQP.
+    Quadratic Programming solver for mediator assignment.
 
     Ported from cadaster-algo's ``slackedQP``. Solves the same assignment
     problem as ``LPSolver`` but penalizes capacity slack quadratically
-    (``lambda * xi^2``) instead of linearly, which OSQP handles directly:
+    (``lambda * xi^2``) instead of linearly:
 
         max  sum_e x_e * (p_v + va_u)  -  lambda * sum_u xi_u^2
         s.t. per-case assignment, slacked per-day capacity, and box bounds.
 
-    OSQP minimizes ``0.5 z' P z + q' z`` subject to ``l <= A z <= u``, so the
-    maximization objective is negated during construction.
+    The problem is assembled in the OSQP standard form ``min 0.5 z' P z + q' z``
+    subject to ``l <= A z <= u`` (the maximization objective is negated during
+    construction). Both backends consume that same (P, q, A, l, u):
+
+    - ``use_gurobi=False`` (default): OSQP, the license-free backend.
+    - ``use_gurobi=True``: Gurobi, the solver used in the original paper
+      (SMaRT §6.2). Requires the ``[gurobi]`` extra and a Gurobi license.
 
     Drop-in replacement for ``LPSolver``: identical constructor signature and
-    ``solve()`` output contract. ``use_gurobi`` is accepted for parity but
-    ignored (OSQP is the backend).
+    ``solve()`` output contract.
     """
 
     def __init__(
@@ -42,14 +46,27 @@ class QPSolver(BaseSolver):
         use_gurobi: bool = False,
         config: Optional[AlgorithmConfig] = None,
     ):
-        try:
-            import osqp
-        except ImportError as e:
-            raise ImportError(
-                "QPSolver requires the 'osqp' extra. Install with: pip install "
-                "'smart-mediator-assignment[qp]'"
-            ) from e
-        self._osqp = osqp
+        self.use_gurobi = use_gurobi
+        self._osqp = None
+        self._gp = None
+        if use_gurobi:
+            try:
+                import gurobipy
+            except ImportError as e:
+                raise ImportError(
+                    "QPSolver(use_gurobi=True) requires the 'gurobi' extra. "
+                    "Install with: pip install 'smart-mediator-assignment[gurobi]'"
+                ) from e
+            self._gp = gurobipy
+        else:
+            try:
+                import osqp
+            except ImportError as e:
+                raise ImportError(
+                    "QPSolver requires the 'osqp' extra. Install with: pip install "
+                    "'smart-mediator-assignment[qp]'"
+                ) from e
+            self._osqp = osqp
 
         self.valid_mediators = valid_mediators
         self.mediator_case_loads = mediator_case_loads
@@ -58,7 +75,6 @@ class QPSolver(BaseSolver):
         self.med_by_court_case_type = med_by_court_case_type
         self.lambda_penalty = float(lambda_penalty)
         self.time_horizon = int(time_horizon)
-        self.use_gurobi = use_gurobi  # ignored; kept for LPSolver signature parity
         self.config = config
 
         self._current_day: Optional[Union[date, datetime]] = None
@@ -138,8 +154,10 @@ class QPSolver(BaseSolver):
 
         self._n_var = self._n_x + self._n_xi
 
-    def _build_primal(self) -> None:
-        """Assemble the OSQP problem (P, q, A, l, u) and set up the solver."""
+    def _build_matrices(
+        self,
+    ) -> Tuple["sp.csc_matrix", np.ndarray, "sp.csc_matrix", np.ndarray, np.ndarray]:
+        """Assemble the standard-form problem (P, q, A, l, u)."""
         self._build_indices()
 
         # Quadratic term: lambda * xi^2. OSQP uses 0.5 z'Pz, so 2*lambda on the diagonal.
@@ -246,6 +264,10 @@ class QPSolver(BaseSolver):
         l = np.array(lower, dtype=float)
         u = np.array(upper, dtype=float)
 
+        return P, q, A, l, u
+
+    def _setup_osqp(self, P, q, A, l, u) -> None:
+        """Configure the OSQP solver from the standard-form matrices."""
         self._prob = self._osqp.OSQP()
         self._prob.setup(
             P=P,
@@ -262,6 +284,56 @@ class QPSolver(BaseSolver):
             warm_start=True,
             adaptive_rho=True,
         )
+
+    def _make_gurobi_env(self):
+        """Build a WLS ``gp.Env`` if credentials are configured, else None.
+
+        Returning None lets the caller fall back to Gurobi's default license
+        resolution (e.g. a local ``gurobi.lic``).
+        """
+        cfg = self.config
+        if cfg is None:
+            return None
+        if not (cfg.gurobi_access_id and cfg.gurobi_secret and cfg.gurobi_license_id):
+            return None
+        params = {
+            "WLSACCESSID": cfg.gurobi_access_id,
+            "WLSSECRET": cfg.gurobi_secret,
+            "LICENSEID": int(cfg.gurobi_license_id),
+            "OutputFlag": 0,
+        }
+        return self._gp.Env(params=params)
+
+    def _solve_gurobi(self, P, q, A, l, u) -> np.ndarray:
+        """Solve the standard-form QP with Gurobi and return the primal vector."""
+        gp = self._gp
+        GRB = gp.GRB
+
+        env = self._make_gurobi_env()
+        m = gp.Model(env=env) if env is not None else gp.Model()
+        m.Params.OutputFlag = 0
+
+        z = m.addMVar(self._n_var, lb=-GRB.INFINITY, ub=GRB.INFINITY)
+        m.setObjective(0.5 * (z @ P @ z) + q @ z, GRB.MINIMIZE)
+
+        # np.inf is not a valid Gurobi bound; GRB.INFINITY is its sentinel.
+        u_g = np.where(np.isposinf(u), GRB.INFINITY, u)
+        l_g = np.where(np.isneginf(l), -GRB.INFINITY, l)
+        m.addConstr(A @ z <= u_g)
+        m.addConstr(A @ z >= l_g)
+
+        m.optimize()
+
+        if m.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
+            raise RuntimeError(f"Gurobi solve failed with status: {m.Status}")
+        if m.Status == GRB.SUBOPTIMAL:
+            warnings.warn(
+                f"Gurobi did not solve to optimality (status: {m.Status}); "
+                "returning the available primal iterate.",
+                stacklevel=2,
+            )
+
+        return np.asarray(z.X, dtype=float)
 
     def _solve_model(self) -> np.ndarray:
         """Run OSQP and return the primal result vector."""
@@ -292,7 +364,7 @@ class QPSolver(BaseSolver):
     def _extract_assignments(
         self, z: np.ndarray, tol: float = 1e-9
     ) -> AssignmentDistribution:
-        """Read edge assignment values from the OSQP result vector."""
+        """Read edge assignment values from the solver's primal result vector."""
         assignments: AssignmentDistribution = {}
 
         for (u, v), idx in self._x_index.items():
@@ -337,7 +409,12 @@ class QPSolver(BaseSolver):
         phantom_cases = phantom_cases or []
 
         self._build_graph(cases, phantom_cases)
-        self._build_primal()
-        z = self._solve_model()
+        P, q, A, l, u = self._build_matrices()
+
+        if self.use_gurobi:
+            z = self._solve_gurobi(P, q, A, l, u)
+        else:
+            self._setup_osqp(P, q, A, l, u)
+            z = self._solve_model()
 
         return self._extract_assignments(z)
