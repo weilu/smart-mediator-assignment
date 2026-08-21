@@ -201,6 +201,16 @@ def estimate_va(
     if isinstance(end_date, str):
         end_date = datetime.strptime(end_date, '%Y-%m-%d')
 
+    # Match VA_Antoine.py:89-96: only apply the start/end window (and re-anchor the
+    # quasiyear bucketing on end_date) when end_date precedes the datapull/reference
+    # date. When end_date == reference_date, all cases are used and waiting-for-
+    # appointment (NaT med_appt_date) cases are retained for prediction.
+    apply_window = (
+        start_date is not None and end_date is not None
+        and end_date < config.reference_date
+    )
+    anchor_date = end_date if apply_window else config.reference_date
+
     df = _cases_to_dataframe(cases)
 
     # Data preparation
@@ -226,7 +236,7 @@ def estimate_va(
     df.loc[df['court_station'] == 'MILIMANI', 'court_station'] = 'AAAMilimani'
 
     # Generate quasi-year and month indicators
-    df = _assign_quasiyear(df, config.reference_date)
+    df = _assign_quasiyear(df, anchor_date)
 
     # Case-level frame: captured before the "data issue" drops below, so cases
     # excluded from the fit (missing mediator, pandemic period, singleton
@@ -244,16 +254,12 @@ def estimate_va(
         config.pandemic_start, config.pandemic_end, inclusive="both"
     )]
 
-    # Filter by date range (a window, not a data-issue drop -> also applied to df_case)
-    if start_date is not None and end_date is not None:
+    # Window filter (VA_Antoine.py:93) -- only when end_date precedes the reference date;
+    # applied to df_case too so the fitted and prediction frames share one population.
+    # When end_date == reference_date the reference uses all cases (NaT-appt rows kept).
+    if apply_window:
         df = df.loc[df['med_appt_date'].between(start_date, end_date, inclusive="left")]
         df_case = df_case.loc[df_case['med_appt_date'].between(start_date, end_date, inclusive="left")]
-    elif start_date is not None:
-        df = df.loc[df['med_appt_date'] >= start_date]
-        df_case = df_case.loc[df_case['med_appt_date'] >= start_date]
-    elif end_date is not None:
-        df = df.loc[df['med_appt_date'] < end_date]
-        df_case = df_case.loc[df_case['med_appt_date'] < end_date]
 
     # Group small mediators
     concltotal = df[df['case_status'] == 'CONCLUDED'].groupby('mediator_id').size()
@@ -296,7 +302,7 @@ def estimate_va(
     qy_mask = df_case['quasiyear'].isna() & ~df_case['med_appt_date'].between(
         config.pandemic_start, config.pandemic_end, inclusive="both")
     df_case.loc[qy_mask, 'quasiyear'] = df['quasiyear'].max()
-    df_case.loc[df_case['appt_month'].isna(), 'appt_month'] = config.reference_date.month
+    df_case.loc[df_case['appt_month'].isna(), 'appt_month'] = anchor_date.month
 
     result = _fit_and_score(df, df_case, config)
     result.prepared = prepared_frame
