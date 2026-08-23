@@ -1,6 +1,6 @@
 [project]
 name = "smart-mediator-assignment"
-version = "0.2.0"
+version = "0.3.0"
 description = "LP-based mediator assignment algorithm for court mediation systems"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -27,6 +27,12 @@ from .algorithm import (
     VAEstimationResult,
     estimate_va,
     estimate_va_from_prepared,
+    estimate_lognormal_duration_params,
+    clean_hazard_sample,
+    read_xlsx_duration_params,
+    simplify_case_types,
+    LEGACY_2_SIMPLIFIED_CTYPE,
+    CASE_TYPE_NAMES,
 )
 from .assignment import (
     MediatorRecommendation,
@@ -35,7 +41,7 @@ from .assignment import (
     get_recommendations_batch,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     # Config
@@ -64,6 +70,14 @@ __all__ = [
     "VAEstimationResult",
     "estimate_va",
     "estimate_va_from_prepared",
+    # Case-type taxonomy (shared by VA + duration)
+    "LEGACY_2_SIMPLIFIED_CTYPE",
+    "CASE_TYPE_NAMES",
+    "simplify_case_types",
+    # Duration estimation
+    "estimate_lognormal_duration_params",
+    "clean_hazard_sample",
+    "read_xlsx_duration_params",
     # Assignment
     "MediatorRecommendation",
     "RecommendationResult",

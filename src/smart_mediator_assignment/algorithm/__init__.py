@@ -15,6 +15,16 @@ from .va_estimation import (
     estimate_va,
     estimate_va_from_prepared,
 )
+from .case_types import (
+    LEGACY_2_SIMPLIFIED_CTYPE,
+    CASE_TYPE_NAMES,
+    simplify_case_types,
+)
+from .duration_estimation import (
+    estimate_lognormal_duration_params,
+    clean_hazard_sample,
+    read_xlsx_duration_params,
+)
 
 __all__ = [
     "compute_posterior",
@@ -33,4 +43,12 @@ __all__ = [
     "VAEstimationResult",
     "estimate_va",
     "estimate_va_from_prepared",
+    # Case-type taxonomy (shared by VA + duration)
+    "LEGACY_2_SIMPLIFIED_CTYPE",
+    "CASE_TYPE_NAMES",
+    "simplify_case_types",
+    # Duration estimation
+    "estimate_lognormal_duration_params",
+    "clean_hazard_sample",
+    "read_xlsx_duration_params",
 ]

@@ -15,6 +15,7 @@ import numpy as np
 
 from ..core.types import MediatorId
 from ..core.case import CaseProtocol
+from .case_types import simplify_case_types
 
 
 @dataclass
@@ -112,12 +113,9 @@ def _calculate_half_means(group: pd.DataFrame, mediator_id: int) -> pd.DataFrame
 def _simplify_case_types(df: pd.DataFrame) -> pd.DataFrame:
     """Simplify case types into broader groupings for regression.
 
-    Maps individual case types into simplified categories:
-    - Civil Cases, Civil Appeals -> Civil group
-    - Divorce and Separation, Family Appeals, Family Miscellaneous,
-      Succession (Probate & Administration - P&A) -> AAAFamily group (reference)
-    - Commercial Cases, Tax Appeals -> Commercial and tax group
-    - All others retain original case_type
+    Delegates to the shared taxonomy (algorithm.case_types). Uses the 'AAAFamily group'
+    label so the family grouping sorts first and becomes the omitted reference category in
+    the fixed-effects regression.
 
     Args:
         df: DataFrame with 'case_type' column
@@ -126,14 +124,9 @@ def _simplify_case_types(df: pd.DataFrame) -> pd.DataFrame:
         DataFrame with added 'casetype_simplified' column
     """
     df = df.copy()
-    df['casetype_simplified'] = df['case_type']
-    df.loc[df['case_type'].isin(['Civil Cases', 'Civil Appeals']), 'casetype_simplified'] = 'Civil group'
-    df.loc[df['case_type'].isin([
-        'Divorce and Separation', 'Family Appeals', 'Family Miscellaneous',
-        'Succession (Probate & Administration - P&A)'
-    ]), 'casetype_simplified'] = 'AAAFamily group'
-    df.loc[df['case_type'].isin(['Commercial Cases', 'Tax Appeals']),
-           'casetype_simplified'] = 'Commercial and tax group'
+    df['casetype_simplified'] = simplify_case_types(
+        df['case_type'], family_group_label='AAAFamily group'
+    )
     return df
 
 
