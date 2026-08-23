@@ -88,6 +88,22 @@ class TestComputePosterior:
         assert not np.isnan(sigma)
         assert sigma > 0
 
+    def test_value_pin(self):
+        """Exact-output pins captured from the original in-repo real_avg_var_sample before
+        it was switched to delegate here; guards the posterior math against silent drift."""
+        # (case_history, prior_mu, prior_sigma, expected_mu, expected_sd)
+        cases = [
+            (([0.3, 0.5], [0.4, 0.6, 0.7]), 0.0, 0.13, 0.02982244701950433, 0.11239996923317447),
+            (([], [0.5]), 0.05, 0.12, 0.07618175562046273, 0.11710913747727686),
+            (([0.6, 0.6, 0.6], []), -0.1, 0.13, -0.19000215408501597, 0.12040986324093508),
+            (([0.2], [0.8, 0.9]), 0.02, 0.10, 0.02989579014290857, 0.09782827236825155),
+            (([0.5] * 5, [0.5] * 5), 0.0, 0.134, 3.878850699900853e-18, 0.0993259855067486),
+        ]
+        for case_history, prior_mu, prior_sigma, expected_mu, expected_sd in cases:
+            mu, sd = compute_posterior(case_history, prior_mu=prior_mu, prior_sigma=prior_sigma)
+            np.testing.assert_allclose(mu, expected_mu, atol=1e-9)
+            np.testing.assert_allclose(sd, expected_sd, atol=1e-9)
+
 
 class TestUpdateBelief:
     """Tests for belief state updates."""
