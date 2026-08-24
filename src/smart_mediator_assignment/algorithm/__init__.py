@@ -22,7 +22,6 @@ from .case_types import (
 from .duration_estimation import (
     estimate_lognormal_duration_params,
     clean_hazard_sample,
-    read_xlsx_duration_params,
 )
 
 __all__ = [
@@ -48,5 +47,4 @@ __all__ = [
     # Duration estimation
     "estimate_lognormal_duration_params",
     "clean_hazard_sample",
-    "read_xlsx_duration_params",
 ]

@@ -79,6 +79,18 @@ def test_sparse_type_is_proxied_not_dropped():
     assert not est["Criminal Cases"]["agreement"].get("proxied")
 
 
+def test_zero_usable_type_is_proxied_not_dropped():
+    # A type present in the raw pull but with ALL rows failing cleaning (here: terminated) must
+    # still be modeled via the proxy, not silently dropped from the case-type universe.
+    fittable = [_clean_case(case_type="Criminal Cases", case_outcome_agreement=(i % 2))
+                for i in range(600)]
+    zero_usable = [_clean_case(case_type="Judicial Review", outcome_name="Terminated")
+                   for _ in range(5)]  # dropped by the hazard sample -> empty group
+    est = estimate_lognormal_duration_params(_df(*fittable, *zero_usable), DATAPULL, min_fit_n=30)
+    assert "Judicial Review" in est
+    assert est["Judicial Review"]["agreement"].get("proxied") is True
+
+
 def test_oversized_proxied_type_warns():
     fittable = [_clean_case(case_type="Criminal Cases", case_outcome_agreement=(i % 2))
                 for i in range(80)]

@@ -44,29 +44,6 @@ MIN_FIT_N = 30
 # proxied type's arrival share exceeds this - a prompt to obtain real params for it.
 MAX_PROXY_SHARE = 0.01
 
-# Correct identity of the 16 columns in the legacy Casetypes_parameters_lognormal.xlsx,
-# established empirically by matching N-size + intercepts back to reproduced categories.
-# The xlsx etable order is [casetype_simplified code {1,4,5,7,8,11,13,14}] x [agreement, no agreement].
-XLSX_COLUMN_IDENTITY = [
-    ("Children Custody and Maintenance", "agreement"),      # code 1
-    ("Children Custody and Maintenance", "no agreement"),
-    ("Commercial and tax group", "agreement"),              # code 4
-    ("Commercial and tax group", "no agreement"),
-    ("Criminal Cases", "agreement"),                        # code 5
-    ("Criminal Cases", "no agreement"),
-    ("Employment and Labour Relations Cases (ELRC)", "agreement"),   # code 7
-    ("Employment and Labour Relations Cases (ELRC)", "no agreement"),
-    ("Environment and Land Cases (ELC)", "agreement"),      # code 8
-    ("Environment and Land Cases (ELC)", "no agreement"),
-    ("Matrimonial Property Cases", "agreement"),            # code 11
-    ("Matrimonial Property Cases", "no agreement"),
-    ("Civil group", "agreement"),                           # code 13
-    ("Civil group", "no agreement"),
-    ("Family group", "agreement"),                          # code 14
-    ("Family group", "no agreement"),
-]
-
-
 def _lognormal_mle(log_durations: pd.Series) -> dict:
     """Closed-form MLE of an intercept-only lognormal AFT with no censoring.
 
@@ -154,8 +131,14 @@ def estimate_lognormal_duration_params(
         for name, flag in outcomes
     }
 
+    # Model every simplified type present in the pull, not just those with usable rows: a
+    # type whose rows all fail cleaning yields an empty group and falls through to the pooled
+    # proxy, rather than being silently dropped from the sim's case-type universe.
+    empty = sample.iloc[0:0]
+    grouped = {ct: sub for ct, sub in sample.groupby("casetype_simplified")}
     params = {}
-    for ct, g in sample.groupby("casetype_simplified"):
+    for ct in simplify_case_types(df["case_type"]).dropna().unique():
+        g = grouped.get(ct, empty)
         entry = {}
         for name, flag in outcomes:
             logd = g.loc[g["case_outcome_agreement"] == flag, "log_case_days_med"]
@@ -195,21 +178,3 @@ def _guard_proxied_types(df: pd.DataFrame, params: dict) -> None:
         )
 
 
-def read_xlsx_duration_params(path) -> dict:
-    """Read the legacy Casetypes_parameters_lognormal.xlsx with the CORRECT column identity.
-
-    Reference reader for parity checks against the Stata output (not wired into the sim - the
-    sim always reproduces from the pull). Returns only the 8 types Stata actually fit;
-    Constitution and Human Rights + Judicial Review are absent (never fit).
-    """
-    x = pd.read_excel(path, header=None)
-    # rows: 1=Intercept, 3=lnsigma, 5=sigma, 7=N ; cols 1..16 are the estimates.
-    params = {}
-    for col, (name, outcome) in enumerate(XLSX_COLUMN_IDENTITY, start=1):
-        params.setdefault(name, {})[outcome] = {
-            "Intercept": float(x.iloc[1, col]),
-            "Insigma": float(x.iloc[3, col]),
-            "Sigma": float(x.iloc[5, col]),
-            "Number of observations": int(x.iloc[7, col]),
-        }
-    return params

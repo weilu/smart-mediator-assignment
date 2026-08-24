@@ -29,7 +29,6 @@ from .algorithm import (
     estimate_va_from_prepared,
     estimate_lognormal_duration_params,
     clean_hazard_sample,
-    read_xlsx_duration_params,
     simplify_case_types,
     LEGACY_2_SIMPLIFIED_CTYPE,
 )
@@ -75,7 +74,6 @@ __all__ = [
     # Duration estimation
     "estimate_lognormal_duration_params",
     "clean_hazard_sample",
-    "read_xlsx_duration_params",
     # Assignment
     "MediatorRecommendation",
     "RecommendationResult",

@@ -460,8 +460,9 @@ def _fit_and_score(
         'courtofappeal_val', 'const_val'
     ]].sum(axis=1, skipna=True)
 
-    # court_station values grouped into 'zzzSmall' in df but absent from df_case
-    # (captured before that grouping) won't match a fitted category -> backfill.
+    # Faithful to VA_Antoine.py including its ordering: p_pred was already summed above, so
+    # this court_station fillna runs too late to affect p_pred/residuals (an effective no-op).
+    # Kept verbatim for bit-exact parity - do not reorder without re-baselining VA.
     small_mask = df_case['court_station'] == 'zzzSmall'
     if small_mask.any():
         cs_small_value = df_case.loc[small_mask, 'court_station_val'].iloc[0]
