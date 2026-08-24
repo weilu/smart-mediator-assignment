@@ -17,7 +17,6 @@ from .va_estimation import (
 )
 from .case_types import (
     LEGACY_2_SIMPLIFIED_CTYPE,
-    CASE_TYPE_NAMES,
     simplify_case_types,
 )
 from .duration_estimation import (
@@ -45,7 +44,6 @@ __all__ = [
     "estimate_va_from_prepared",
     # Case-type taxonomy (shared by VA + duration)
     "LEGACY_2_SIMPLIFIED_CTYPE",
-    "CASE_TYPE_NAMES",
     "simplify_case_types",
     # Duration estimation
     "estimate_lognormal_duration_params",

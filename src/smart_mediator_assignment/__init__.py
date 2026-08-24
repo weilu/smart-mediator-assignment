@@ -32,7 +32,6 @@ from .algorithm import (
     read_xlsx_duration_params,
     simplify_case_types,
     LEGACY_2_SIMPLIFIED_CTYPE,
-    CASE_TYPE_NAMES,
 )
 from .assignment import (
     MediatorRecommendation,
@@ -72,7 +71,6 @@ __all__ = [
     "estimate_va_from_prepared",
     # Case-type taxonomy (shared by VA + duration)
     "LEGACY_2_SIMPLIFIED_CTYPE",
-    "CASE_TYPE_NAMES",
     "simplify_case_types",
     # Duration estimation
     "estimate_lognormal_duration_params",

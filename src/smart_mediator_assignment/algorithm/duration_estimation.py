@@ -24,7 +24,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
-from .case_types import CASE_TYPE_NAMES, simplify_case_types
+from .case_types import simplify_case_types
 
 _log = logging.getLogger(__name__)
 

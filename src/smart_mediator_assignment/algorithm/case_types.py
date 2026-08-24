@@ -32,20 +32,6 @@ LEGACY_2_SIMPLIFIED_CTYPE = {
     "Tax Appeals": "Commercial and tax group",
 }
 
-# The 10 simplified case types (simulation-facing names).
-CASE_TYPE_NAMES = [
-    "Family group",
-    "Children Custody and Maintenance",
-    "Civil group",
-    "Commercial and tax group",
-    "Constitution and Human Rights",
-    "Criminal Cases",
-    "Employment and Labour Relations Cases (ELRC)",
-    "Environment and Land Cases (ELC)",
-    "Judicial Review",
-    "Matrimonial Property Cases",
-]
-
 
 def simplify_case_types(case_type: pd.Series, family_group_label: str = "Family group") -> pd.Series:
     """Map raw case types to their simplified grouping.
