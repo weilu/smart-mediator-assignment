@@ -1,4 +1,3 @@
-import pytest
 from datetime import date
 
 from smart_mediator_assignment import (

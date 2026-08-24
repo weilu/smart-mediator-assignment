@@ -4,13 +4,11 @@ Integration tests for the full recommendation pipeline.
 These tests verify that all components work together correctly.
 """
 
-import pytest
 from datetime import date, timedelta
 
 from smart_mediator_assignment import (
     SimpleCase,
     BeliefState,
-    MediatorBelief,
     AlgorithmConfig,
     get_recommendations,
     get_recommendations_batch,

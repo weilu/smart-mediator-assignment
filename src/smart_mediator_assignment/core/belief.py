@@ -1,6 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
-import copy
+from typing import Dict
 
 from .types import MediatorId, CaseHistory
 
