@@ -29,6 +29,32 @@ def test_qp_solver_assigns_single_case():
 
 
 @pytest.mark.skipif(osqp_missing, reason="osqp extra not installed")
+def test_qp_infeasible_status_raises():
+    """A non-null iterate from an infeasible/unsolved solve must raise, not be returned -
+    it does not satisfy the constraints (matches the reference SlackedQPwithLoadOSQP.py)."""
+    import numpy as np
+    from smart_mediator_assignment import QPSolver
+
+    class _Info:
+        status = "primal infeasible"
+
+    class _Res:
+        info = _Info()
+        x = np.array([0.5, 0.5])
+
+    class _Prob:
+        def solve(self):
+            return _Res()
+
+    solver = QPSolver(capacity=1, lambda_penalty=1.0, time_horizon=10,
+                      valid_mediators=[1], mediator_case_loads={1: 0},
+                      mediator_vas={1: 0.1}, med_by_court_case_type={})
+    solver._prob = _Prob()
+    with pytest.raises(RuntimeError, match="primal infeasible"):
+        solver._solve_model()
+
+
+@pytest.mark.skipif(osqp_missing, reason="osqp extra not installed")
 def test_qp_congested_activates_slack():
     # capacity=1 with 3 same-day cases eligible to both mediators forces the
     # capacity constraint to bind (slack xi capped at load+1=1), so mediator 1

@@ -148,16 +148,18 @@ for case in result.case_predictions:
 ```
 
 `estimate_va` always populates `result.prepared` with the cleaned, collapsed frame it fit
-on. For incremental refresh (e.g. re-estimating on a growing window every few days), reuse
-that frame with `estimate_va_from_prepared` to skip re-cleaning the raw cases:
+on. Reuse it with `estimate_va_from_prepared` to re-estimate on a **sub-window** of that frame
+without re-cleaning the raw cases. Reuse can only select rows already present in `prepared`, so
+it cannot widen the window — build the initial frame through your latest (reference) date, then
+narrow:
 
 ```python
-# Re-estimate on a wider window without re-cleaning the raw cases
+# result.prepared was built through the reference date above; re-estimate on a contained sub-window
 refreshed = estimate_va_from_prepared(
     result.prepared,
     config=config,
     start_date="2016-04-06",
-    end_date="2022-02-01",
+    end_date="2021-06-01",
 )
 ```
 

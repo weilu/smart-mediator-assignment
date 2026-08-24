@@ -305,8 +305,9 @@ def estimate_va(
 def estimate_va_from_prepared(
     prepared: pd.DataFrame,
     config: Optional[VAEstimationConfig] = None,
-    start_date: Optional[Union[str, datetime]] = None,
-    end_date: Optional[Union[str, datetime]] = None,
+    *,
+    start_date: Union[str, datetime],
+    end_date: Union[str, datetime],
 ) -> VAEstimationResult:
     """
     Re-estimate mediator VA from a previously prepared (cleaned, collapsed) frame.
@@ -447,6 +448,9 @@ def _fit_and_score(
     df_case = df_case.merge(params_dict['params_referral_mode'], on='referral_mode', how='left')
     df_case = df_case.merge(params_dict['params_highcourt'], on='highcourt', how='left')
     df_case = df_case.merge(params_dict['params_courtofappeal'], on='courtofappeal', how='left')
+    # params_const is keyed on case_outcome_agreement {0,1}; pending cases (null outcome) do
+    # not match, so const_val stays NaN and the skipna sum below drops the intercept for them.
+    # Faithful to VA_Antoine.py - changing it would diverge from the parity baseline.
     df_case = df_case.merge(params_dict['params_const'], on='case_outcome_agreement', how='left')
 
     # Calculate predictions and residuals

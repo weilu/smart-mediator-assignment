@@ -351,14 +351,15 @@ class QPSolver(BaseSolver):
         self._res = self._prob.solve()
         status = str(self._res.info.status).lower()
 
-        if status == "solved":
+        # Status handling mirrors the reference SlackedQPwithLoadOSQP.py: accept only solved
+        # (incl. inaccurate) and a max-iter run that still returned a primal iterate; raise on
+        # everything else (primal/dual infeasible, unsolved, max-iter with no iterate) since
+        # such a vector does not satisfy the constraints and could violate capacity.
+        if status in ("solved", "solved inaccurate"):
             pass
-        elif self._res.x is not None:
-            # Accept a non-optimal primal iterate (inaccurate / max-iter reached),
-            # but surface it: per-case normalization keeps sums at 1, yet the
-            # underlying assignment may be suboptimal. Matches the reference intent.
+        elif status == "maximum iterations reached" and self._res.x is not None:
             warnings.warn(
-                f"OSQP did not solve to optimality (status: {self._res.info.status}); "
+                f"OSQP hit max iterations (status: {self._res.info.status}); "
                 "returning the available primal iterate.",
                 stacklevel=2,
             )
