@@ -7,7 +7,7 @@ characteristics, then applies shrinkage to produce stable VA estimates.
 """
 
 from dataclasses import dataclass
-from datetime import datetime, date
+from datetime import datetime
 from typing import Union, Optional, List, Dict
 import calendar
 import pandas as pd

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Dict, List, Optional, Union
 
-from ..core.case import CaseProtocol, SimpleCase
+from ..core.case import CaseProtocol
 from ..core.belief import BeliefState
 from ..core.types import (
     MediatorId,

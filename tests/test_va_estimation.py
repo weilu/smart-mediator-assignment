@@ -206,7 +206,6 @@ def generate_synthetic_cases(
     mediator_vas = {i: np.random.normal(0, 0.1) for i in range(1, n_mediators + 1)}
 
     cases = []
-    base_date = datetime(2020, 1, 1)
 
     for i in range(n_cases):
         # Random dates
