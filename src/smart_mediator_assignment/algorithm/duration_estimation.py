@@ -34,15 +34,8 @@ PANDEMIC_START = pd.Timestamp("2020-03-15")
 PANDEMIC_END = pd.Timestamp("2021-06-30")
 POST_PANDEMIC = pd.Timedelta(days=60)          # keep excluding this long after pandemic_end
 
-# Below this many usable cases per outcome, a case type cannot be reliably fit on its own data
-# and is given a proxy duration (the pooled all-cases distribution) instead. Its cases are
-# still modeled: the SMaRT RCT is system-wide across all case types (PAP_Nov2024), so every
-# arriving type must occupy mediator capacity in the sim - none are dropped.
-MIN_FIT_N = 30
-
-# A proxied type's duration is only approximate, which matters only at volume. Warn if a
-# proxied type's arrival share exceeds this - a prompt to obtain real params for it.
-MAX_PROXY_SHARE = 0.01
+MIN_FIT_N = 30          # min usable cases per outcome to fit a type; fewer -> pooled proxy
+MAX_PROXY_SHARE = 0.01  # warn if a proxied type exceeds this share of arrivals
 
 def _lognormal_mle(log_durations: pd.Series) -> dict:
     """Closed-form MLE of an intercept-only lognormal AFT with no censoring.
@@ -111,15 +104,11 @@ def estimate_lognormal_duration_params(
 ) -> dict:
     """Fit lognormal duration params per (case type, outcome) from a raw case pull.
 
-    Returns {case_type_name: {"agreement": {...}, "no agreement": {...}}} for EVERY case type
-    present in the pull - the SMaRT RCT is system-wide, so all arriving types are modeled. A
-    type with < `min_fit_n` usable cases in an outcome (Constitution and Human Rights, Judicial
-    Review) is given a proxy for that outcome - the pooled all-cases distribution, marked
-    "proxied": True - rather than dropped, so its cases still occupy mediator capacity.
-
-    NOTE: the proxy is a modeling choice the paper sim never made (it scoped to 8 fittable
-    types); the research team should sanity-check it. A guard warns if a proxied type's
-    arrival share is large enough that the approximation could matter.
+    Returns {case_type_name: {"agreement": {...}, "no agreement": {...}}} for every case type
+    in the pull. A type with < `min_fit_n` usable cases in an outcome falls back to the pooled
+    proxy (marked "proxied": True) rather than being dropped. The proxy is a modeling choice
+    the paper sim never faced - the research team should sanity-check it; a guard warns if a
+    proxied type's arrival share is large enough to matter.
     """
     sample = clean_hazard_sample(df, datapull)
     outcomes = [("agreement", 1), ("no agreement", 0)]
