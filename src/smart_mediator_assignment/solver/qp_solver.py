@@ -316,6 +316,12 @@ class QPSolver(BaseSolver):
         # per solve. z.X is materialized into an owned array before disposal.
         try:
             m.Params.OutputFlag = 0
+            # Solver settings aligned with the retired SlakedQPwithLoad.slackedQP: barrier
+            # (Method=2) with crossover disabled returns the interior optimum, not a basic
+            # vertex. For the degenerate lambda=0 (linear) objective this is what makes the
+            # assignment distribution well-defined and reproducible across the two backends.
+            m.Params.Method = 2
+            m.Params.Crossover = 0
 
             z = m.addMVar(self._n_var, lb=-GRB.INFINITY, ub=GRB.INFINITY)
             m.setObjective(0.5 * (z @ P @ z) + q @ z, GRB.MINIMIZE)
