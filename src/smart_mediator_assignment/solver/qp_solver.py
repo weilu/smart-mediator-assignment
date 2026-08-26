@@ -92,6 +92,8 @@ class QPSolver(BaseSolver):
 
         self._prob = None
         self._res = None
+        self._cap_rows: Dict[Tuple[MediatorId, int], int] = {}
+        self._gurobi_row_duals: Optional[np.ndarray] = None
 
     def _build_graph(
         self,
@@ -159,6 +161,7 @@ class QPSolver(BaseSolver):
     ) -> Tuple["sp.csc_matrix", np.ndarray, "sp.csc_matrix", np.ndarray, np.ndarray]:
         """Assemble the standard-form problem (P, q, A, l, u)."""
         self._build_indices()
+        self._cap_rows = {}   # (mediator, day) -> capacity-constraint row, for shadow prices
 
         # Quadratic term: lambda * xi^2. OSQP uses 0.5 z'Pz, so 2*lambda on the diagonal.
         P_diag = np.zeros(self._n_var, dtype=float)
@@ -223,6 +226,7 @@ class QPSolver(BaseSolver):
                 rhs = float(self.capacity) - float(self.mediator_case_loads[med])
                 lower.append(-np.inf)
                 upper.append(rhs)
+                self._cap_rows[(med, d)] = row_id
                 row_id += 1
 
         # Box bounds 0 <= x <= 1 as explicit rows.
@@ -329,7 +333,7 @@ class QPSolver(BaseSolver):
             # np.inf is not a valid Gurobi bound; GRB.INFINITY is its sentinel.
             u_g = np.where(np.isposinf(u), GRB.INFINITY, u)
             l_g = np.where(np.isneginf(l), -GRB.INFINITY, l)
-            m.addConstr(A @ z <= u_g)
+            c_ub = m.addConstr(A @ z <= u_g)
             m.addConstr(A @ z >= l_g)
 
             m.optimize()
@@ -342,6 +346,15 @@ class QPSolver(BaseSolver):
                     "returning the available primal iterate.",
                     stacklevel=2,
                 )
+
+            # Capacity-row shadow prices come from the <= constraint (cap rows have l=-inf, so
+            # the >= constraint is slack there). Gurobi's Pi for a <= row in a min problem is
+            # <= 0; negate to match OSQP's (and the retired solver's) sign. Unavailable for some
+            # statuses -> leave None so extract_mediator_shadow_prices returns zeros.
+            try:
+                self._gurobi_row_duals = -np.array(c_ub.Pi, dtype=float)
+            except (AttributeError, gp.GurobiError):
+                self._gurobi_row_duals = None
 
             return np.array(z.X, dtype=float)
         finally:
@@ -401,6 +414,33 @@ class QPSolver(BaseSolver):
             assignments[v] = sorted(pairs, key=lambda pair: pair[1], reverse=True)
 
         return assignments
+
+    @property
+    def _row_duals(self) -> Optional[np.ndarray]:
+        """Dual vector aligned with the A-matrix rows from the last solve, or None."""
+        if self.use_gurobi:
+            return self._gurobi_row_duals
+        if self._res is not None and self._res.y is not None:
+            return np.asarray(self._res.y)
+        return None
+
+    def extract_mediator_shadow_prices(self) -> Dict[MediatorId, float]:
+        """Per-mediator C3 shadow price: the sum over the horizon of the per-day
+        capacity-constraint duals.
+
+        Reproduces the retired ``slackedQP.extract_mediator_shadow_prices`` (the ``dual_soln``
+        path). Returns zeros when there is no solve or no duals are available. OSQP dual sign
+        conventions may differ from Gurobi Pi; the Gurobi backend negates Pi to match OSQP.
+        """
+        duals = self._row_duals
+        if duals is None:
+            return {u: 0.0 for u in self._us}
+        return {
+            u: float(sum(duals[self._cap_rows[(u, d)]]
+                         for d in range(self.time_horizon)
+                         if (u, d) in self._cap_rows))
+            for u in self._us
+        }
 
     def solve(
         self,

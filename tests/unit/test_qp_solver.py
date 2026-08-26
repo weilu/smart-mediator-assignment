@@ -1,6 +1,6 @@
 import importlib.util
 import pytest
-from datetime import date
+from datetime import date, timedelta
 from smart_mediator_assignment import SimpleCase, AlgorithmConfig
 
 osqp_missing = importlib.util.find_spec("osqp") is None
@@ -174,3 +174,112 @@ def test_qp_gurobi_matches_osqp():
     assert gp_probs.keys() == osqp_probs.keys()
     for med, p in gp_probs.items():
         assert abs(p - osqp_probs[med]) < 1e-4
+
+
+# Captured from the retired SlackedQPwithLoadOSQP.extract_mediator_shadow_prices on the
+# tight-capacity scenario below (capacity=1, 2 mediators, 3 same-day cases) before deletion.
+_SHADOW_GOLDEN = {1: 1.0499999999999998, 2: 0.95}
+
+
+def _tight_cap_solver(use_gurobi=False):
+    from smart_mediator_assignment import QPSolver
+    return QPSolver(valid_mediators=[1, 2], mediator_case_loads={1: 0, 2: 0}, capacity=1,
+                    mediator_vas={1: 0.2, 2: 0.1},
+                    med_by_court_case_type={"MILIMANI": {"Family group": [1, 2]}},
+                    lambda_penalty=1.0, time_horizon=10, use_gurobi=use_gurobi)
+
+
+def _tight_cap_cases():
+    return [SimpleCase(id=i + 1, case_type="Family group", court_station="MILIMANI",
+                       referral_date=date(2023, 1, 15), p_value=0.5) for i in range(3)]
+
+
+@pytest.mark.skipif(osqp_missing, reason="osqp extra not installed")
+def test_shadow_prices_match_retired_osqp_golden():
+    solver = _tight_cap_solver()
+    solver.solve(_tight_cap_cases(), phantom_cases=[], current_day=date(2023, 1, 15))
+    sp = solver.extract_mediator_shadow_prices()
+    for u, g in _SHADOW_GOLDEN.items():
+        assert abs(sp[u] - g) < 1e-3, (u, sp[u], g)
+
+
+@pytest.mark.skipif(osqp_missing, reason="osqp extra not installed")
+def test_shadow_prices_zero_when_uncongested():
+    from smart_mediator_assignment import QPSolver
+    solver = QPSolver(valid_mediators=[1, 2], mediator_case_loads={1: 0, 2: 0}, capacity=5,
+                      mediator_vas={1: 0.2, 2: 0.1},
+                      med_by_court_case_type={"MILIMANI": {"Family group": [1, 2]}},
+                      lambda_penalty=1.0, time_horizon=10)
+    solver.solve([SimpleCase(id=1, case_type="Family group", court_station="MILIMANI",
+                             referral_date=date(2023, 1, 1), p_value=0.5)],
+                 phantom_cases=[], current_day=date(2023, 1, 1))
+    assert all(abs(v) < 1e-6 for v in solver.extract_mediator_shadow_prices().values())
+
+
+def test_shadow_prices_zero_without_solve():
+    # no solve -> no duals -> zeros (never AttributeErrors, unlike the old missing method)
+    assert _tight_cap_solver().extract_mediator_shadow_prices() == {}
+
+
+@pytest.mark.skipif(gurobi_missing, reason="gurobipy extra not installed")
+@pytest.mark.skipif(osqp_missing, reason="osqp extra not installed")
+def test_gurobi_shadow_prices_match_osqp():
+    osqp_solver = _tight_cap_solver(use_gurobi=False)
+    osqp_solver.solve(_tight_cap_cases(), phantom_cases=[], current_day=date(2023, 1, 15))
+    osqp_sp = osqp_solver.extract_mediator_shadow_prices()
+
+    gp_solver = _tight_cap_solver(use_gurobi=True)
+    try:
+        gp_solver.solve(_tight_cap_cases(), phantom_cases=[], current_day=date(2023, 1, 15))
+    except Exception as e:  # noqa: BLE001
+        if "license" in str(e).lower() or "size-limited" in str(e).lower():
+            pytest.skip(f"Gurobi license unavailable: {e}")
+        raise
+    gp_sp = gp_solver.extract_mediator_shadow_prices()
+    for u in osqp_sp:
+        assert abs(gp_sp[u] - osqp_sp[u]) < 1e-3, (u, gp_sp[u], osqp_sp[u])
+
+
+# Realistic golden captured from the retired SlackedQPwithLoadOSQP: 6 mediators with real VAs
+# (from tests/fixtures/va_golden_df_mediator_20260513.csv in the research repo), 2 court stations
+# x 2 case types, varied eligibility, 12 cases with staggered arrivals, loads near capacity.
+# Exercises the (mediator, day) -> capacity-row mapping across many rows and case types.
+_REAL_VAS = {1335: -0.239793, 855: -0.234265, 907: -0.013297,
+             1070: -0.013273, 1206: 0.202901, 1626: 0.231258}
+_REAL_LOADS = {1206: 2, 1626: 2, 907: 1, 1070: 0, 855: 1, 1335: 0}
+_REAL_ELIG = {"MILIMANI": {"Family group": [1206, 1626, 907], "Civil group": [1206, 1070]},
+              "KAKAMEGA": {"Family group": [1626, 855], "Civil group": [907, 855, 1335]}}
+_REAL_CASE_SPECS = [
+    ("MILIMANI", "Family group", 0.6, 0), ("MILIMANI", "Family group", 0.5, 1),
+    ("MILIMANI", "Family group", 0.55, 2), ("MILIMANI", "Civil group", 0.4, 0),
+    ("MILIMANI", "Civil group", 0.45, 3), ("KAKAMEGA", "Family group", 0.5, 0),
+    ("KAKAMEGA", "Family group", 0.6, 1), ("KAKAMEGA", "Family group", 0.35, 2),
+    ("KAKAMEGA", "Civil group", 0.5, 0), ("KAKAMEGA", "Civil group", 0.45, 1),
+    ("KAKAMEGA", "Civil group", 0.4, 2), ("KAKAMEGA", "Civil group", 0.55, 3),
+]
+_REAL_SHADOW_GOLDEN = {855: 0.1763742, 907: 0.3973422, 1070: 0.0,
+                       1206: 0.6135402, 1335: 0.1708462, 1626: 0.6418972}
+
+
+def _realistic_solver(use_gurobi=False):
+    from smart_mediator_assignment import QPSolver
+    return QPSolver(valid_mediators=list(_REAL_VAS), mediator_case_loads=dict(_REAL_LOADS),
+                    capacity=3, mediator_vas=dict(_REAL_VAS), med_by_court_case_type=_REAL_ELIG,
+                    lambda_penalty=1.0, time_horizon=10, use_gurobi=use_gurobi)
+
+
+def _realistic_cases():
+    base = date(2023, 1, 15)
+    return [SimpleCase(id=i + 1, case_type=t, court_station=s,
+                       referral_date=base + timedelta(days=o), p_value=p)
+            for i, (s, t, p, o) in enumerate(_REAL_CASE_SPECS)]
+
+
+@pytest.mark.skipif(osqp_missing, reason="osqp extra not installed")
+def test_shadow_prices_match_retired_osqp_realistic_golden():
+    solver = _realistic_solver()
+    solver.solve(_realistic_cases(), phantom_cases=[], current_day=date(2023, 1, 15))
+    sp = solver.extract_mediator_shadow_prices()
+    assert set(sp) == set(_REAL_SHADOW_GOLDEN)
+    for u, g in _REAL_SHADOW_GOLDEN.items():
+        assert abs(sp[u] - g) < 1e-6, (u, sp[u], g)
