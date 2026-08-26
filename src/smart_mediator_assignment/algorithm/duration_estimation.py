@@ -29,7 +29,7 @@ from .case_types import simplify_case_types
 _log = logging.getLogger(__name__)
 
 # --- cleaning.do locals (verbatim) -------------------------------------------
-CUTOFF = 300                                   # days: "too new" (issue 6) threshold
+CUTOFF = 180                                   # days: "too new" (issue 6) cutoff; 02062024 pull's Stata `local cutoff`
 PANDEMIC_START = pd.Timestamp("2020-03-15")
 PANDEMIC_END = pd.Timestamp("2021-06-30")
 POST_PANDEMIC = pd.Timedelta(days=60)          # keep excluding this long after pandemic_end
@@ -83,7 +83,7 @@ def clean_hazard_sample(df: pd.DataFrame, datapull: pd.Timestamp) -> pd.DataFram
         & (cdm >= 0)                               # not issue 4
         & ((feasible_gap - cdm) >= 0)              # not issue 5
         & (feasible_gap >= CUTOFF)                 # not issue 6 (too new)
-        & ~((ref > PANDEMIC_START) & (ref < PANDEMIC_END + POST_PANDEMIC))  # not issue 7 (pandemic)
+        & ~((appt > PANDEMIC_START) & (appt < PANDEMIC_END + POST_PANDEMIC))  # not issue 7 (pandemic)
     )
 
     df["casetype_simplified"] = simplify_case_types(df["case_type"])
