@@ -28,11 +28,16 @@ from .case_types import simplify_case_types
 
 _log = logging.getLogger(__name__)
 
-# --- cleaning.do locals (verbatim) -------------------------------------------
-CUTOFF = 180                                   # days: "too new" (issue 6) cutoff; 02062024 pull's Stata `local cutoff`
+# --- 01_cleaning.do locals ---------------------------------------------------
+# Pandemic window (excluded), keyed on mediator_appointment_date (01_cleaning.do issue 4).
 PANDEMIC_START = pd.Timestamp("2020-03-15")
 PANDEMIC_END = pd.Timestamp("2021-06-30")
 POST_PANDEMIC = pd.Timedelta(days=60)          # keep excluding this long after pandemic_end
+
+# "Too new" cutoff: minimum days between appointment and datapull. The current Stata pipeline
+# (02_Hazard_DMP.do) omits this filter; whether to apply it is a research decision deferred to
+# the economist, so it's a parameter defaulting to 0 (no exclusion). Older pulls used 180 / 300.
+DEFAULT_CUTOFF = 0
 
 MIN_FIT_N = 30          # min usable cases per outcome to fit a type; fewer -> pooled proxy
 MAX_PROXY_SHARE = 0.01  # warn if a proxied type exceeds this share of arrivals
@@ -53,37 +58,36 @@ def _lognormal_mle(log_durations: pd.Series) -> dict:
     }
 
 
-def clean_hazard_sample(df: pd.DataFrame, datapull: pd.Timestamp) -> pd.DataFrame:
-    """Reproduce cleaning.do + 02_Hazard_AS.do sample selection.
+def clean_hazard_sample(
+    df: pd.DataFrame, datapull: pd.Timestamp, cutoff: int = DEFAULT_CUTOFF
+) -> pd.DataFrame:
+    """Reproduce the 01_cleaning.do + 02_Hazard_DMP.do sample selection.
 
-    Returns concluded, non-terminated cases with an observed agreement outcome and no
-    data-quality/too-new/pandemic issue, with added `case_days_med`, `casetype_simplified`,
-    and `log_case_days_med` columns.
+    The hazard script drops four data-quality issues - missing mediator id, missing appointment
+    date, conclusion-before-appointment, and pandemic appointment - plus terminated cases, and
+    fits on concluded cases with an observed agreement outcome. Returns that sample with added
+    `case_days_med`, `casetype_simplified`, and `log_case_days_med` columns.
+
+    `cutoff` is the optional "too new" threshold (min days between appointment and datapull); the
+    current Stata pipeline omits it, so it defaults to 0 (no exclusion) - see DEFAULT_CUTOFF.
     """
     df = df.copy()
-    ref = pd.to_datetime(df["referral_date"], errors="coerce")
     appt = pd.to_datetime(df["mediator_appointment_date"], errors="coerce")
     concl = pd.to_datetime(df["conclusion_date"], errors="coerce")
 
-    # case_days_med: days under mediation; datapull fallback for non-concluded (cleaning.do:144-145)
+    # case_days_med: days under mediation; datapull fallback for non-concluded (01_cleaning.do)
     cdm = (concl - appt).dt.days
     cdm = cdm.where(df["case_status"] != "PENDING", (datapull - appt).dt.days)
     df["case_days_med"] = cdm
 
     feasible_gap = (datapull - appt).dt.days      # days elapsed since appointment
-    gap = (appt - ref).dt.days                     # appointment lag
 
-    # issue == missing  <=>  none of cleaning.do's conditions 1..7 apply. The hazard script
-    # drops exclusion(1-5) + issue6 + issue7, i.e. every flagged case, so the sample is
-    # exactly the unflagged cases.
     no_issue = (
-        df["mediator_id"].notna()                  # not issue 1
-        & (gap >= 0)                               # not issue 2
-        & appt.notna()                             # not issue 3
-        & (cdm >= 0)                               # not issue 4
-        & ((feasible_gap - cdm) >= 0)              # not issue 5
-        & (feasible_gap >= CUTOFF)                 # not issue 6 (too new)
-        & ~((appt > PANDEMIC_START) & (appt < PANDEMIC_END + POST_PANDEMIC))  # not issue 7 (pandemic)
+        df["mediator_id"].notna()                  # issue 1: missing mediator id
+        & appt.notna()                             # issue 2: appointment date missing
+        & (cdm >= 0)                               # issue 3: conclusion before appointment
+        & ~((appt > PANDEMIC_START) & (appt < PANDEMIC_END + POST_PANDEMIC))  # issue 4: pandemic (appt date)
+        & (feasible_gap >= cutoff)                 # "too new": omitted upstream, no-op at cutoff=0
     )
 
     df["casetype_simplified"] = simplify_case_types(df["case_type"])
@@ -100,7 +104,8 @@ def clean_hazard_sample(df: pd.DataFrame, datapull: pd.Timestamp) -> pd.DataFram
 
 
 def estimate_lognormal_duration_params(
-    df: pd.DataFrame, datapull: pd.Timestamp, min_fit_n: int = MIN_FIT_N
+    df: pd.DataFrame, datapull: pd.Timestamp, min_fit_n: int = MIN_FIT_N,
+    cutoff: int = DEFAULT_CUTOFF,
 ) -> dict:
     """Fit lognormal duration params per (case type, outcome) from a raw case pull.
 
@@ -108,9 +113,10 @@ def estimate_lognormal_duration_params(
     in the pull. A type with < `min_fit_n` usable cases in an outcome falls back to the pooled
     proxy (marked "proxied": True) rather than being dropped. The proxy is a modeling choice
     the paper sim never faced - the research team should sanity-check it; a guard warns if a
-    proxied type's arrival share is large enough to matter.
+    proxied type's arrival share is large enough to matter. `cutoff` is the optional "too new"
+    threshold (default 0 = no exclusion; see clean_hazard_sample).
     """
-    sample = clean_hazard_sample(df, datapull)
+    sample = clean_hazard_sample(df, datapull, cutoff)
     outcomes = [("agreement", 1), ("no agreement", 0)]
 
     # Pooled fallback per outcome, for types too sparse to fit on their own data.

@@ -45,20 +45,26 @@ def test_clean_case_is_kept():
 
 
 @pytest.mark.parametrize("override", [
-    {"mediator_id": np.nan},                                              # issue 1
-    {"referral_date": "2022-03-01"},                                      # issue 2: appt before referral
-    {"mediator_appointment_date": np.nan},                               # issue 3
-    {"conclusion_date": "2022-01-15"},                                    # issue 4: concl before appt
-    {"conclusion_date": "2025-01-01"},                                    # issue 5: concl after datapull
-    {"mediator_appointment_date": "2023-12-15",                          # issue 6: too new (<300d before pull)
-     "conclusion_date": "2023-12-20", "referral_date": "2023-12-01"},
+    {"mediator_id": np.nan},                                              # issue 1: missing mediator id
+    {"mediator_appointment_date": np.nan},                               # issue 2: appointment date missing
+    {"conclusion_date": "2022-01-15"},                                    # issue 3: conclusion before appointment
     {"referral_date": "2020-06-01", "mediator_appointment_date": "2020-07-01",
-     "conclusion_date": "2020-09-01"},                                    # issue 7: pandemic referral
+     "conclusion_date": "2020-09-01"},                                    # issue 4: pandemic (appointment date)
     {"outcome_name": "Terminated"},                                       # caseoutcome == 4
     {"case_outcome_agreement": np.nan},                                   # no observed outcome
 ])
 def test_each_exclusion_drops_the_case(override):
+    # the four data-quality issues 02_Hazard_DMP.do drops, plus terminated / no-outcome.
     assert len(clean_hazard_sample(_df(_clean_case(**override)), DATAPULL)) == 0
+
+
+def test_cutoff_drops_too_new_only_when_set():
+    # "too new" is off by default (cutoff=0) - the current Stata pipeline omits it - so a
+    # recent-appointment case is kept unless a cutoff is passed (the knob deferred to the economist).
+    too_new = _clean_case(referral_date="2023-12-01", mediator_appointment_date="2023-12-15",
+                          conclusion_date="2023-12-20")  # appt 17 days before the 2024-01-01 pull
+    assert len(clean_hazard_sample(_df(too_new), DATAPULL)) == 1               # default cutoff=0: kept
+    assert len(clean_hazard_sample(_df(too_new), DATAPULL, cutoff=300)) == 0   # excluded when set
 
 
 def test_lognormal_mle_is_normal_fit_to_log_duration():
