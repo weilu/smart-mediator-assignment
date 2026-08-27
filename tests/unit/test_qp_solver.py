@@ -311,9 +311,7 @@ def test_solve_stats_collected_when_requested():
     assert s["num_capacity_constrs"] == 6 * 10           # every (mediator, day) over the horizon
     assert s["num_assignment_constrs"] == 12             # one row per case with edges
     assert s["num_linear_nz"] > 0 and s["num_quadratic_nz"] >= 0
-    # OSQP timing/iteration/residual diagnostics are present and finite (the residual fields
-    # must resolve across the advertised osqp range: pri_res/dua_res on 0.6.x, prim_res/dual_res
-    # on 1.x).
+    # OSQP timing/iteration/residual diagnostics are present and finite.
     assert s["wall_clock_s"] >= 0
     assert s["iter_count"] >= 0
     import math

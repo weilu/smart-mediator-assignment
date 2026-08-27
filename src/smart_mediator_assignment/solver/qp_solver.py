@@ -288,12 +288,12 @@ class QPSolver(BaseSolver):
             l=l,
             u=u,
             verbose=False,
-            polish=True,
+            polishing=True,
             eps_abs=1e-6,
             eps_rel=1e-6,
             max_iter=100000,
             scaled_termination=True,
-            warm_start=True,
+            warm_starting=True,
             adaptive_rho=True,
         )
 
@@ -487,14 +487,6 @@ class QPSolver(BaseSolver):
             stats.update(self._gurobi_solve_info or {"backend": "gurobi"})
         else:
             info = self._res.info if self._res is not None else None
-            # Residual fields were renamed across the advertised osqp range (>=0.6.3): 0.6.x
-            # exposes pri_res/dua_res, 1.x prim_res/dual_res. Try both so the diagnostic isn't
-            # silently NaN on a supported 0.6.x install.
-            def _res_field(new_name, old_name):
-                val = getattr(info, new_name, None)
-                if val is None:
-                    val = getattr(info, old_name, np.nan)
-                return float(val)
             stats.update({
                 "backend": "osqp",
                 "solver_status": str(getattr(info, "status", None)),
@@ -502,8 +494,8 @@ class QPSolver(BaseSolver):
                 "osqp_run_time_s": float(getattr(info, "run_time", np.nan)),
                 "osqp_setup_time_s": float(getattr(info, "setup_time", np.nan)),
                 "osqp_solve_time_s": float(getattr(info, "solve_time", np.nan)),
-                "prim_res": _res_field("prim_res", "pri_res"),
-                "dual_res": _res_field("dual_res", "dua_res"),
+                "prim_res": float(getattr(info, "prim_res", np.nan)),
+                "dual_res": float(getattr(info, "dual_res", np.nan)),
             })
         return stats
 
