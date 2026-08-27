@@ -290,8 +290,11 @@ def estimate_va(
     df_case = df_case.reset_index()
 
     # Waiting-for-appointment cases (no med_appt_date -> NaN quasiyear/appt_month from
-    # _assign_quasiyear) still need prediction covariates: bucket them into the most
-    # recent quasiyear/month so they get a p_pred instead of a silently-zeroed one.
+    # _assign_quasiyear) still need prediction covariates so they get a p_pred instead of a
+    # silently-zeroed one. Faithful to VA_Antoine.py:243: quasiyear -> the oldest observed
+    # bucket (quasiyear=0 is newest, higher is older, so .max() is the oldest), month -> the
+    # anchor month. Value-locked by test_df_case_p_pred_matches_golden, whose PENDING-case subset
+    # covers this branch to 1e-9.
     qy_mask = df_case['quasiyear'].isna() & ~df_case['med_appt_date'].between(
         config.pandemic_start, config.pandemic_end, inclusive="both")
     df_case.loc[qy_mask, 'quasiyear'] = df['quasiyear'].max()
