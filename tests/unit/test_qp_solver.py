@@ -283,3 +283,34 @@ def test_shadow_prices_match_retired_osqp_realistic_golden():
     assert set(sp) == set(_REAL_SHADOW_GOLDEN)
     for u, g in _REAL_SHADOW_GOLDEN.items():
         assert abs(sp[u] - g) < 1e-6, (u, sp[u], g)
+
+
+@pytest.mark.skipif(osqp_missing, reason="osqp extra not installed")
+def test_solve_stats_not_collected_by_default():
+    solver = _realistic_solver()
+    solver.solve(_realistic_cases(), phantom_cases=[], current_day=date(2023, 1, 15))
+    assert solver.last_solve_stats is None
+
+
+@pytest.mark.skipif(osqp_missing, reason="osqp extra not installed")
+def test_solve_stats_collected_when_requested():
+    solver = _realistic_solver()
+    solver.solve(_realistic_cases(), phantom_cases=[], current_day=date(2023, 1, 15),
+                 collect_stats=True)
+    s = solver.last_solve_stats
+    assert s is not None
+    assert s["backend"] == "osqp"
+    # Model structure agrees with the scenario (6 mediators, 12 real cases, no phantoms).
+    assert s["num_valid_mediators"] == 6
+    assert s["num_real_cases"] == 12
+    assert s["num_phantom_cases"] == 0
+    assert s["num_total_cases"] == 12
+    assert s["num_vars"] == s["num_x_vars"] + s["num_xi_vars"]
+    assert s["num_xi_vars"] == 6
+    assert s["num_capacity_constrs"] == 6 * 10           # every (mediator, day) over the horizon
+    assert s["num_assignment_constrs"] == 12             # one row per case with edges
+    assert s["num_linear_nz"] > 0 and s["num_quadratic_nz"] >= 0
+    # OSQP timing/iteration diagnostics are present and finite.
+    assert s["wall_clock_s"] >= 0
+    assert s["iter_count"] >= 0
+    assert s["objective_value"] == pytest.approx(s["objective_value"])  # finite (not NaN)

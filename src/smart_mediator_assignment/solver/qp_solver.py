@@ -1,3 +1,4 @@
+import time
 import warnings
 from datetime import date, datetime
 from typing import Dict, List, Optional, Tuple, Union
@@ -94,6 +95,13 @@ class QPSolver(BaseSolver):
         self._res = None
         self._cap_rows: Dict[Tuple[MediatorId, int], int] = {}
         self._gurobi_row_duals: Optional[np.ndarray] = None
+
+        # Solve diagnostics (model structure + solver timing/iterations + objective), populated
+        # when solve(collect_stats=True). A reusable diagnostic; callers that want it persisted
+        # (e.g. the research sim's QP runtime-stats CSV) serialize this dict themselves.
+        self.last_solve_stats: Optional[dict] = None
+        self._collect_stats = False
+        self._gurobi_solve_info: Optional[dict] = None
 
     def _build_graph(
         self,
@@ -356,6 +364,17 @@ class QPSolver(BaseSolver):
             except (AttributeError, gp.GurobiError):
                 self._gurobi_row_duals = None
 
+            if self._collect_stats:
+                # Capture before dispose(): the model (and its stats) are gone afterwards.
+                self._gurobi_solve_info = {
+                    "backend": "gurobi",
+                    "solver_status_code": int(m.Status),
+                    "gurobi_runtime_s": float(getattr(m, "Runtime", float("nan"))),
+                    "bar_iter_count": float(getattr(m, "BarIterCount", float("nan"))),
+                    "iter_count": float(getattr(m, "IterCount", float("nan"))),
+                    "node_count": float(getattr(m, "NodeCount", float("nan"))),
+                }
+
             return np.array(z.X, dtype=float)
         finally:
             m.dispose()
@@ -415,6 +434,66 @@ class QPSolver(BaseSolver):
 
         return assignments
 
+    def _build_solve_stats(
+        self, P, q, A, z, wall_clock_s: float, num_real_cases: int, num_phantom_cases: int
+    ) -> dict:
+        """Assemble the solve diagnostics dict for ``last_solve_stats``.
+
+        A unified schema across backends: model structure (sizes, sparsity, per-case degree),
+        the objective in the original maximization form, and wall-clock plus backend-native
+        solver timing/iteration counters. Reusable on its own; the research sim serializes it.
+        """
+        mediators_per_case: Dict[CaseId, int] = {}
+        for (_u, v) in self._edges:
+            mediators_per_case[v] = mediators_per_case.get(v, 0) + 1
+        mpc = list(mediators_per_case.values())
+
+        num_vars = int(self._n_var)
+        num_constrs = int(A.shape[0])
+
+        # Original objective is a maximization; the standard form negates it (min 0.5 z'Pz + q'z).
+        min_obj = 0.5 * float(z @ (P @ z)) + float(q @ z)
+
+        stats = {
+            "num_real_cases": int(num_real_cases),
+            "num_phantom_cases": int(num_phantom_cases),
+            "num_total_cases": len(dict.fromkeys(self._vs)),
+            "num_valid_mediators": len(self._us),
+            "num_edges": len(self._edges),
+            "avg_mediators_per_case": (sum(mpc) / len(mpc)) if mpc else 0.0,
+            "min_mediators_per_case": min(mpc) if mpc else 0,
+            "max_mediators_per_case": max(mpc) if mpc else 0,
+            "num_vars": num_vars,
+            "num_x_vars": int(self._n_x),
+            "num_xi_vars": int(self._n_xi),
+            "num_constrs": num_constrs,
+            "num_assignment_constrs": len({v for (_u, v) in self._edges}),
+            "num_capacity_constrs": len(self._cap_rows),
+            "num_linear_nz": int(A.nnz),
+            "num_quadratic_nz": int(P.nnz),
+            "flop_proxy_cubic_numvars_plus_numconstrs": float(num_vars + num_constrs) ** 3,
+            "lambda": self.lambda_penalty,
+            "time_horizon": self.time_horizon,
+            "objective_value": -min_obj,
+            "wall_clock_s": wall_clock_s,
+        }
+
+        if self.use_gurobi:
+            stats.update(self._gurobi_solve_info or {"backend": "gurobi"})
+        else:
+            info = self._res.info if self._res is not None else None
+            stats.update({
+                "backend": "osqp",
+                "solver_status": str(getattr(info, "status", None)),
+                "iter_count": int(getattr(info, "iter", -1)),
+                "osqp_run_time_s": float(getattr(info, "run_time", np.nan)),
+                "osqp_setup_time_s": float(getattr(info, "setup_time", np.nan)),
+                "osqp_solve_time_s": float(getattr(info, "solve_time", np.nan)),
+                "prim_res": float(getattr(info, "prim_res", np.nan)),
+                "dual_res": float(getattr(info, "dual_res", np.nan)),
+            })
+        return stats
+
     @property
     def _row_duals(self) -> Optional[np.ndarray]:
         """Dual vector aligned with the A-matrix rows from the last solve, or None."""
@@ -447,6 +526,7 @@ class QPSolver(BaseSolver):
         cases: List[CaseProtocol],
         phantom_cases: Optional[List[CaseProtocol]] = None,
         current_day: Optional[Union[date, datetime]] = None,
+        collect_stats: bool = False,
     ) -> AssignmentDistribution:
         """
         Solve the assignment problem.
@@ -455,6 +535,8 @@ class QPSolver(BaseSolver):
             cases: List of cases to assign
             phantom_cases: Optional list of phantom (future) cases
             current_day: Current date for time-horizon calculations
+            collect_stats: populate ``last_solve_stats`` with model-structure and
+                solver timing/iteration diagnostics for this solve
 
         Returns:
             Dictionary mapping case_id -> [(mediator_id, probability), ...]
@@ -462,14 +544,24 @@ class QPSolver(BaseSolver):
         """
         self._current_day = current_day
         phantom_cases = phantom_cases or []
+        self._collect_stats = collect_stats
+        self.last_solve_stats = None
+        self._gurobi_solve_info = None
 
         self._build_graph(cases, phantom_cases)
         P, q, A, l, u = self._build_matrices()
 
+        wall_start = time.perf_counter()
         if self.use_gurobi:
             z = self._solve_gurobi(P, q, A, l, u)
         else:
             self._setup_osqp(P, q, A, l, u)
             z = self._solve_model()
+        wall_clock_s = time.perf_counter() - wall_start
+
+        if collect_stats:
+            self.last_solve_stats = self._build_solve_stats(
+                P, q, A, z, wall_clock_s, len(cases), len(phantom_cases)
+            )
 
         return self._extract_assignments(z)
