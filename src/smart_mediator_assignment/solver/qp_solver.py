@@ -434,9 +434,7 @@ class QPSolver(BaseSolver):
 
         return assignments
 
-    def _build_solve_stats(
-        self, P, q, A, z, wall_clock_s: float, num_real_cases: int, num_phantom_cases: int
-    ) -> dict:
+    def _build_solve_stats(self, P, q, A, z, wall_clock_s: float) -> dict:
         """Assemble the solve diagnostics dict for ``last_solve_stats``.
 
         A unified schema across backends: model structure (sizes, sparsity, per-case degree),
@@ -451,13 +449,20 @@ class QPSolver(BaseSolver):
         num_vars = int(self._n_var)
         num_constrs = int(A.shape[0])
 
+        # All case counts derive from the modeled graph (_vs), so they stay mutually consistent:
+        # a case with an unknown station/type or no eligible mediator is dropped by _build_graph
+        # and counts in none of them. Phantom cases carry id < 0 throughout.
+        modeled_ids = list(dict.fromkeys(self._vs))
+        num_real_cases = sum(1 for v in modeled_ids if v >= 0)
+        num_phantom_cases = sum(1 for v in modeled_ids if v < 0)
+
         # Original objective is a maximization; the standard form negates it (min 0.5 z'Pz + q'z).
         min_obj = 0.5 * float(z @ (P @ z)) + float(q @ z)
 
         stats = {
-            "num_real_cases": int(num_real_cases),
-            "num_phantom_cases": int(num_phantom_cases),
-            "num_total_cases": len(dict.fromkeys(self._vs)),
+            "num_real_cases": num_real_cases,
+            "num_phantom_cases": num_phantom_cases,
+            "num_total_cases": len(modeled_ids),
             "num_valid_mediators": len(self._us),
             "num_edges": len(self._edges),
             "avg_mediators_per_case": (sum(mpc) / len(mpc)) if mpc else 0.0,
@@ -482,6 +487,14 @@ class QPSolver(BaseSolver):
             stats.update(self._gurobi_solve_info or {"backend": "gurobi"})
         else:
             info = self._res.info if self._res is not None else None
+            # Residual fields were renamed across the advertised osqp range (>=0.6.3): 0.6.x
+            # exposes pri_res/dua_res, 1.x prim_res/dual_res. Try both so the diagnostic isn't
+            # silently NaN on a supported 0.6.x install.
+            def _res_field(new_name, old_name):
+                val = getattr(info, new_name, None)
+                if val is None:
+                    val = getattr(info, old_name, np.nan)
+                return float(val)
             stats.update({
                 "backend": "osqp",
                 "solver_status": str(getattr(info, "status", None)),
@@ -489,8 +502,8 @@ class QPSolver(BaseSolver):
                 "osqp_run_time_s": float(getattr(info, "run_time", np.nan)),
                 "osqp_setup_time_s": float(getattr(info, "setup_time", np.nan)),
                 "osqp_solve_time_s": float(getattr(info, "solve_time", np.nan)),
-                "prim_res": float(getattr(info, "prim_res", np.nan)),
-                "dual_res": float(getattr(info, "dual_res", np.nan)),
+                "prim_res": _res_field("prim_res", "pri_res"),
+                "dual_res": _res_field("dual_res", "dua_res"),
             })
         return stats
 
@@ -560,8 +573,6 @@ class QPSolver(BaseSolver):
         wall_clock_s = time.perf_counter() - wall_start
 
         if collect_stats:
-            self.last_solve_stats = self._build_solve_stats(
-                P, q, A, z, wall_clock_s, len(cases), len(phantom_cases)
-            )
+            self.last_solve_stats = self._build_solve_stats(P, q, A, z, wall_clock_s)
 
         return self._extract_assignments(z)

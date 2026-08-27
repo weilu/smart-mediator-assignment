@@ -216,6 +216,7 @@ def test_shadow_prices_zero_when_uncongested():
     assert all(abs(v) < 1e-6 for v in solver.extract_mediator_shadow_prices().values())
 
 
+@pytest.mark.skipif(osqp_missing, reason="osqp extra not installed")
 def test_shadow_prices_zero_without_solve():
     # no solve -> no duals -> zeros (never AttributeErrors, unlike the old missing method)
     assert _tight_cap_solver().extract_mediator_shadow_prices() == {}
@@ -310,7 +311,11 @@ def test_solve_stats_collected_when_requested():
     assert s["num_capacity_constrs"] == 6 * 10           # every (mediator, day) over the horizon
     assert s["num_assignment_constrs"] == 12             # one row per case with edges
     assert s["num_linear_nz"] > 0 and s["num_quadratic_nz"] >= 0
-    # OSQP timing/iteration diagnostics are present and finite.
+    # OSQP timing/iteration/residual diagnostics are present and finite (the residual fields
+    # must resolve across the advertised osqp range: pri_res/dua_res on 0.6.x, prim_res/dual_res
+    # on 1.x).
     assert s["wall_clock_s"] >= 0
     assert s["iter_count"] >= 0
-    assert s["objective_value"] == pytest.approx(s["objective_value"])  # finite (not NaN)
+    import math
+    assert math.isfinite(s["objective_value"])
+    assert math.isfinite(s["prim_res"]) and math.isfinite(s["dual_res"])
