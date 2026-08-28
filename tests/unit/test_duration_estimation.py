@@ -58,13 +58,13 @@ def test_each_exclusion_drops_the_case(override):
     assert len(clean_hazard_sample(_df(_clean_case(**override)), DATAPULL)) == 0
 
 
-def test_cutoff_drops_too_new_only_when_set():
-    # "too new" is off by default (cutoff=0) - the current Stata pipeline omits it - so a
-    # recent-appointment case is kept unless a cutoff is passed (the knob deferred to the economist).
+def test_cutoff_drops_too_new_by_default():
+    # "too new": a case appointed within the cutoff (default 180 days) of the pull is dropped -
+    # it hasn't had time to conclude. Passing cutoff=0 disables the filter and keeps it.
     too_new = _clean_case(referral_date="2023-12-01", mediator_appointment_date="2023-12-15",
                           conclusion_date="2023-12-20")  # appt 17 days before the 2024-01-01 pull
-    assert len(clean_hazard_sample(_df(too_new), DATAPULL)) == 1               # default cutoff=0: kept
-    assert len(clean_hazard_sample(_df(too_new), DATAPULL, cutoff=300)) == 0   # excluded when set
+    assert len(clean_hazard_sample(_df(too_new), DATAPULL)) == 0             # default 180: dropped
+    assert len(clean_hazard_sample(_df(too_new), DATAPULL, cutoff=0)) == 1   # kept when disabled
 
 
 def test_lognormal_mle_is_normal_fit_to_log_duration():
@@ -75,35 +75,40 @@ def test_lognormal_mle_is_normal_fit_to_log_duration():
     assert fit["Number of observations"] == 5
 
 
-def test_sparse_type_is_proxied_not_dropped():
+def test_sparse_type_is_fit_on_own_data_not_proxied():
+    # A rare type with only a handful of usable cases is fit on its own data (used as-is),
+    # not proxied - the agreed policy proxies only types with no usable case at all.
     fittable = [_clean_case(case_type="Criminal Cases", case_outcome_agreement=(i % 2))
                 for i in range(500)]
     sparse = [_clean_case(case_type="Judicial Review", case_outcome_agreement=(i % 2))
-              for i in range(4)]  # <1% of arrivals, below the proxy-share guard
-    est = estimate_lognormal_duration_params(_df(*fittable, *sparse), DATAPULL, min_fit_n=30)
-    assert est["Judicial Review"]["agreement"].get("proxied") is True
+              for i in range(4)]  # 2 agreement + 2 no agreement
+    est = estimate_lognormal_duration_params(_df(*fittable, *sparse), DATAPULL)
+    assert not est["Judicial Review"]["agreement"].get("proxied")
+    assert est["Judicial Review"]["agreement"]["Number of observations"] == 2
     assert not est["Criminal Cases"]["agreement"].get("proxied")
 
 
 def test_zero_usable_type_is_proxied_not_dropped():
     # A type present in the raw pull but with ALL rows failing cleaning (here: terminated) must
-    # still be modeled via the proxy, not silently dropped from the case-type universe.
+    # still be modeled via the global-pool proxy, not silently dropped from the case-type universe.
     fittable = [_clean_case(case_type="Criminal Cases", case_outcome_agreement=(i % 2))
                 for i in range(600)]
     zero_usable = [_clean_case(case_type="Judicial Review", outcome_name="Terminated")
                    for _ in range(5)]  # dropped by the hazard sample -> empty group
-    est = estimate_lognormal_duration_params(_df(*fittable, *zero_usable), DATAPULL, min_fit_n=30)
+    est = estimate_lognormal_duration_params(_df(*fittable, *zero_usable), DATAPULL)
     assert "Judicial Review" in est
     assert est["Judicial Review"]["agreement"].get("proxied") is True
 
 
 def test_oversized_proxied_type_warns():
+    # A type with NO usable case (all fail cleaning) proxies from the global pool; if its arrival
+    # share is large the guard warns - the pooled duration is a poor stand-in at that scale.
     fittable = [_clean_case(case_type="Criminal Cases", case_outcome_agreement=(i % 2))
                 for i in range(80)]
-    sparse = [_clean_case(case_type="Judicial Review", case_outcome_agreement=(i % 2))
-              for i in range(20)]  # 20% of arrivals, well over MAX_PROXY_SHARE
+    zero_usable = [_clean_case(case_type="Judicial Review", outcome_name="Terminated")
+                   for _ in range(20)]  # 20% of arrivals, all dropped -> empty group -> proxy
     with pytest.warns(UserWarning, match="proxied case type"):
-        est = estimate_lognormal_duration_params(_df(*fittable, *sparse), DATAPULL, min_fit_n=30)
+        est = estimate_lognormal_duration_params(_df(*fittable, *zero_usable), DATAPULL)
     assert est["Judicial Review"]["agreement"].get("proxied") is True  # proxied, NOT dropped
 
 

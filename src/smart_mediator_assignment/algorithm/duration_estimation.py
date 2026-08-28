@@ -2,14 +2,15 @@
 
 The duration parameters (Intercept, Sigma per case type x outcome) were historically
 produced by two Stata scripts run on a WB-side data pull:
-  - cleaning.do        -> builds the analysis sample (exclusion / issue6 / issue7 flags)
-  - 02_Hazard_AS.do    -> streg, distribution(lognormal) -> Casetypes_parameters_lognormal.xlsx
+  - 01_cleaning.do     -> builds the analysis sample (data-quality issue flags)
+  - 02_Hazard_DMP.do   -> streg, distribution(lognormal) -> Casetypes_parameters_lognormal.xlsx
 
 This module reproduces both, faithfully, on a deidentified case pull, so the params
 re-compute automatically on every fresh pull and cover every case type the RCT handles.
-Stata fit only 8 of 10 types; the two too-sparse-to-fit types (Constitution and Human Rights,
-Judicial Review) get a pooled proxy duration so their cases are still simulated - the SMaRT RCT
-is system-wide across all case types (PAP_Nov2024), so none are dropped.
+Every type with at least one concluded case that passes the filters is fit on its own data
+(however few - the rare types are used as-is, matching Stata). A type with no such case (e.g. a
+newly introduced case type) falls back to the global pooled duration so its cases are still
+simulated - the SMaRT RCT is system-wide across all case types (PAP_Nov2024), so none are dropped.
 
 The intercept-only lognormal AFT with no censoring (the analysis sample keeps only concluded,
 non-terminated cases with an observed outcome) has a closed-form MLE: it is just a Normal
@@ -34,13 +35,12 @@ PANDEMIC_START = pd.Timestamp("2020-03-15")
 PANDEMIC_END = pd.Timestamp("2021-06-30")
 POST_PANDEMIC = pd.Timedelta(days=60)          # keep excluding this long after pandemic_end
 
-# "Too new" cutoff: minimum days between appointment and datapull. The current Stata pipeline
-# (02_Hazard_DMP.do) omits this filter; whether to apply it is a research decision deferred to
-# the economist, so it's a parameter defaulting to 0 (no exclusion). Older pulls used 180 / 300.
-DEFAULT_CUTOFF = 0
+# "Too new" cutoff: minimum days between appointment and datapull. Recently-appointed cases
+# have not had time to conclude, so including them would bias durations downward; the agreed
+# pipeline drops those appointed within 180 days of the pull (kept a parameter for other pulls).
+DEFAULT_CUTOFF = 180
 
-MIN_FIT_N = 30          # min usable cases per outcome to fit a type; fewer -> pooled proxy
-MAX_PROXY_SHARE = 0.01  # warn if a proxied type exceeds this share of arrivals
+MAX_PROXY_SHARE = 0.01  # warn if a global-pool-proxied type exceeds this share of arrivals
 
 def _lognormal_mle(log_durations: pd.Series) -> dict:
     """Closed-form MLE of an intercept-only lognormal AFT with no censoring.
@@ -68,8 +68,9 @@ def clean_hazard_sample(
     fits on concluded cases with an observed agreement outcome. Returns that sample with added
     `case_days_med`, `casetype_simplified`, and `log_case_days_med` columns.
 
-    `cutoff` is the optional "too new" threshold (min days between appointment and datapull); the
-    current Stata pipeline omits it, so it defaults to 0 (no exclusion) - see DEFAULT_CUTOFF.
+    `cutoff` is the "too new" threshold (min days between appointment and datapull): a case
+    appointed within `cutoff` days of the pull hasn't had time to conclude and is dropped
+    (default 180; see DEFAULT_CUTOFF).
     """
     df = df.copy()
     appt = pd.to_datetime(df["mediator_appointment_date"], errors="coerce")
@@ -87,7 +88,7 @@ def clean_hazard_sample(
         & appt.notna()                             # issue 2: appointment date missing
         & (cdm >= 0)                               # issue 3: conclusion before appointment
         & ~((appt > PANDEMIC_START) & (appt < PANDEMIC_END + POST_PANDEMIC))  # issue 4: pandemic (appt date)
-        & (feasible_gap >= cutoff)                 # "too new": omitted upstream, no-op at cutoff=0
+        & (feasible_gap >= cutoff)                 # "too new": appointed within cutoff days of pull
     )
 
     df["casetype_simplified"] = simplify_case_types(df["case_type"])
@@ -104,22 +105,22 @@ def clean_hazard_sample(
 
 
 def estimate_lognormal_duration_params(
-    df: pd.DataFrame, datapull: pd.Timestamp, min_fit_n: int = MIN_FIT_N,
-    cutoff: int = DEFAULT_CUTOFF,
+    df: pd.DataFrame, datapull: pd.Timestamp, cutoff: int = DEFAULT_CUTOFF,
 ) -> dict:
     """Fit lognormal duration params per (case type, outcome) from a raw case pull.
 
     Returns {case_type_name: {"agreement": {...}, "no agreement": {...}}} for every case type
-    in the pull. A type with < `min_fit_n` usable cases in an outcome falls back to the pooled
-    proxy (marked "proxied": True) rather than being dropped. The proxy is a modeling choice
-    the paper sim never faced - the research team should sanity-check it; a guard warns if a
-    proxied type's arrival share is large enough to matter. `cutoff` is the optional "too new"
-    threshold (default 0 = no exclusion; see clean_hazard_sample).
+    in the pull. A (type, outcome) with at least one usable case is fit on its own data, however
+    few (the rare types are used as-is, matching Stata). A (type, outcome) with no usable case -
+    e.g. a newly introduced case type with no concluded history - falls back to the global pooled
+    duration (marked "proxied": True) rather than being dropped; a guard warns if such a proxied
+    type's arrival share is large enough to matter. `cutoff` is the "too new" threshold (see
+    clean_hazard_sample; default 180 days).
     """
     sample = clean_hazard_sample(df, datapull, cutoff)
     outcomes = [("agreement", 1), ("no agreement", 0)]
 
-    # Pooled fallback per outcome, for types too sparse to fit on their own data.
+    # Global pool per outcome, for types with no usable case of their own.
     pooled = {
         name: _lognormal_mle(sample.loc[sample["case_outcome_agreement"] == flag,
                                         "log_case_days_med"])
@@ -137,12 +138,12 @@ def estimate_lognormal_duration_params(
         entry = {}
         for name, flag in outcomes:
             logd = g.loc[g["case_outcome_agreement"] == flag, "log_case_days_med"]
-            if len(logd) >= min_fit_n:
+            if len(logd) >= 1:
                 entry[name] = _lognormal_mle(logd)
             else:
                 proxy = dict(pooled[name])
                 proxy["proxied"] = True
-                proxy["proxy_n"] = int(len(logd))  # this type's own (insufficient) count
+                proxy["proxy_n"] = 0  # no usable case of its own -> global pool
                 entry[name] = proxy
         params[ct] = entry
 
