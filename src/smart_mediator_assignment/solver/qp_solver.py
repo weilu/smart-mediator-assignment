@@ -1,0 +1,570 @@
+import time
+import warnings
+from datetime import date, datetime
+from typing import Dict, List, Optional, Tuple, Union
+
+import numpy as np
+import scipy.sparse as sp
+
+from .base import BaseSolver, AssignmentDistribution
+from ..core.types import MediatorId, CaseId, CaseLoads, MediatorVAs, MedByCrtCaseType
+from ..core.case import CaseProtocol
+from ..config import AlgorithmConfig
+
+
+class QPSolver(BaseSolver):
+    """
+    Quadratic Programming solver for mediator assignment.
+
+    Ported from cadaster-algo's ``slackedQP``. Solves the same assignment
+    problem as ``LPSolver`` but penalizes capacity slack quadratically
+    (``lambda * xi^2``) instead of linearly:
+
+        max  sum_e x_e * (p_v + va_u)  -  lambda * sum_u xi_u^2
+        s.t. per-case assignment, slacked per-day capacity, and box bounds.
+
+    The problem is assembled in the OSQP standard form ``min 0.5 z' P z + q' z``
+    subject to ``l <= A z <= u`` (the maximization objective is negated during
+    construction). Both backends consume that same (P, q, A, l, u):
+
+    - ``use_gurobi=False`` (default): OSQP, the license-free backend.
+    - ``use_gurobi=True``: Gurobi, the solver used in the original paper
+      (SMaRT §6.2). Requires the ``[gurobi]`` extra and a Gurobi license.
+
+    Drop-in replacement for ``LPSolver``: identical constructor signature and
+    ``solve()`` output contract.
+    """
+
+    def __init__(
+        self,
+        valid_mediators: List[MediatorId],
+        mediator_case_loads: CaseLoads,
+        capacity: int,
+        mediator_vas: MediatorVAs,
+        med_by_court_case_type: MedByCrtCaseType,
+        lambda_penalty: float = 1.0,
+        time_horizon: int = 10,
+        use_gurobi: bool = False,
+        config: Optional[AlgorithmConfig] = None,
+    ):
+        self.use_gurobi = use_gurobi
+        self._osqp = None
+        self._gp = None
+        if use_gurobi:
+            try:
+                import gurobipy
+            except ImportError as e:
+                raise ImportError(
+                    "QPSolver(use_gurobi=True) requires the 'gurobi' extra. "
+                    "Install with: pip install 'smart-mediator-assignment[gurobi]'"
+                ) from e
+            self._gp = gurobipy
+        else:
+            try:
+                import osqp
+            except ImportError as e:
+                raise ImportError(
+                    "QPSolver requires the 'osqp' extra. Install with: pip install "
+                    "'smart-mediator-assignment[qp]'"
+                ) from e
+            self._osqp = osqp
+
+        self.valid_mediators = valid_mediators
+        self.mediator_case_loads = mediator_case_loads
+        self.capacity = capacity
+        self.mediator_vas = mediator_vas
+        self.med_by_court_case_type = med_by_court_case_type
+        self.lambda_penalty = float(lambda_penalty)
+        self.time_horizon = int(time_horizon)
+        self.config = config
+
+        self._current_day: Optional[Union[date, datetime]] = None
+        self._us: List[MediatorId] = []
+        self._vs: List[CaseId] = []
+        self._edges: List[Tuple[MediatorId, CaseId]] = []
+        self._case_arrival_time_by_id: Dict[CaseId, Union[date, datetime, int]] = {}
+        self._case_p_vals: Dict[CaseId, float] = {}
+
+        self._x_index: Dict[Tuple[MediatorId, CaseId], int] = {}
+        self._xi_index: Dict[MediatorId, int] = {}
+        self._n_x = 0
+        self._n_xi = 0
+        self._n_var = 0
+
+        self._prob = None
+        self._res = None
+        self._cap_rows: Dict[Tuple[MediatorId, int], int] = {}
+        self._gurobi_row_duals: Optional[np.ndarray] = None
+
+        # Solve diagnostics (model structure + solver timing/iterations + objective), populated
+        # when solve(collect_stats=True). A reusable diagnostic; callers that want it persisted
+        # (e.g. the research sim's QP runtime-stats CSV) serialize this dict themselves.
+        self.last_solve_stats: Optional[dict] = None
+        self._collect_stats = False
+        self._gurobi_solve_info: Optional[dict] = None
+
+    def _build_graph(
+        self,
+        unassigned_cases: List[CaseProtocol],
+        phantom_cases: List[CaseProtocol],
+    ) -> None:
+        """Build the bipartite graph of mediators to cases."""
+        self._us = list(self.valid_mediators)
+        self._vs = []
+        self._edges = []
+        self._case_arrival_time_by_id = {}
+        self._case_p_vals = {}
+
+        for case in phantom_cases + unassigned_cases:
+            station_id = case.court_station
+            type_id = case.case_type
+
+            if station_id not in self.med_by_court_case_type:
+                continue
+            if type_id not in self.med_by_court_case_type[station_id]:
+                continue
+
+            relevant_meds = [
+                m
+                for m in self.med_by_court_case_type[station_id][type_id]
+                if m in self._us
+            ]
+
+            if not relevant_meds:
+                continue
+
+            self._vs.append(case.id)
+            self._case_arrival_time_by_id[case.id] = case.referral_date
+            self._case_p_vals[case.id] = case.p_value
+
+            for med_id in relevant_meds:
+                self._edges.append((med_id, case.id))
+
+        self._edges = list(set(self._edges))
+
+    def _active_indicator(self, case_id: CaseId, d: int) -> int:
+        """Whether case ``case_id`` still occupies capacity on horizon day ``d``."""
+        case_arrival = self._case_arrival_time_by_id[case_id]
+        if self._current_day is None:
+            return int(d <= case_arrival)
+        if isinstance(case_arrival, (date, datetime)) and isinstance(
+            self._current_day, (date, datetime)
+        ):
+            days_diff = (case_arrival - self._current_day).days
+        else:
+            days_diff = case_arrival - self._current_day
+        return int(d <= days_diff)
+
+    def _build_indices(self) -> None:
+        self._x_index = {e: idx for idx, e in enumerate(self._edges)}
+        self._n_x = len(self._edges)
+
+        self._xi_index = {u: self._n_x + offset for offset, u in enumerate(self._us)}
+        self._n_xi = len(self._us)
+
+        self._n_var = self._n_x + self._n_xi
+
+    def _build_matrices(
+        self,
+    ) -> Tuple["sp.csc_matrix", np.ndarray, "sp.csc_matrix", np.ndarray, np.ndarray]:
+        """Assemble the standard-form problem (P, q, A, l, u)."""
+        self._build_indices()
+        self._cap_rows = {}   # (mediator, day) -> capacity-constraint row, for shadow prices
+
+        # Quadratic term: lambda * xi^2. OSQP uses 0.5 z'Pz, so 2*lambda on the diagonal.
+        P_diag = np.zeros(self._n_var, dtype=float)
+        if self.lambda_penalty != 0.0:
+            for u in self._us:
+                P_diag[self._xi_index[u]] = 2.0 * self.lambda_penalty
+        P = sp.diags(P_diag, format="csc")
+
+        q = np.zeros(self._n_var, dtype=float)
+        for (u, v), idx in self._x_index.items():
+            success_prob = float(self._case_p_vals[v]) + float(self.mediator_vas[u])
+            q[idx] = -success_prob  # negate: original objective is a maximization
+
+        rows: List[int] = []
+        cols: List[int] = []
+        data: List[float] = []
+        lower: List[float] = []
+        upper: List[float] = []
+        row_id = 0
+
+        # (C1) per-case assignment: real cases (id >= 0) must sum to 1;
+        # phantom cases (id < 0) may sum to at most 1.
+        edges_by_v: Dict[CaseId, List[Tuple[MediatorId, CaseId]]] = {}
+        for e in self._edges:
+            edges_by_v.setdefault(e[1], []).append(e)
+
+        for v in dict.fromkeys(self._vs):
+            E_v = edges_by_v.get(v, [])
+            if not E_v:
+                continue
+
+            for e in E_v:
+                rows.append(row_id)
+                cols.append(self._x_index[e])
+                data.append(1.0)
+
+            if v >= 0:
+                lower.append(1.0)
+                upper.append(1.0)
+            else:
+                lower.append(-np.inf)
+                upper.append(1.0)
+            row_id += 1
+
+        # (C2) slacked per-day capacity: sum of active x - xi <= capacity - load.
+        edges_by_u: Dict[MediatorId, List[Tuple[MediatorId, CaseId]]] = {}
+        for e in self._edges:
+            edges_by_u.setdefault(e[0], []).append(e)
+
+        for d in range(self.time_horizon):
+            for med in self._us:
+                for (_, v) in edges_by_u.get(med, []):
+                    if self._active_indicator(v, d):
+                        rows.append(row_id)
+                        cols.append(self._x_index[(med, v)])
+                        data.append(1.0)
+
+                rows.append(row_id)
+                cols.append(self._xi_index[med])
+                data.append(-1.0)
+
+                rhs = float(self.capacity) - float(self.mediator_case_loads[med])
+                lower.append(-np.inf)
+                upper.append(rhs)
+                self._cap_rows[(med, d)] = row_id
+                row_id += 1
+
+        # Box bounds 0 <= x <= 1 as explicit rows.
+        for e, idx in self._x_index.items():
+            rows.append(row_id)
+            cols.append(idx)
+            data.append(1.0)
+            lower.append(0.0)
+            upper.append(np.inf)
+            row_id += 1
+
+            rows.append(row_id)
+            cols.append(idx)
+            data.append(1.0)
+            lower.append(-np.inf)
+            upper.append(1.0)
+            row_id += 1
+
+        # Box bounds 0 <= xi <= load + 1.
+        for med in self._us:
+            idx = self._xi_index[med]
+            xi_ub = float(self.mediator_case_loads[med] + 1)
+
+            rows.append(row_id)
+            cols.append(idx)
+            data.append(1.0)
+            lower.append(0.0)
+            upper.append(np.inf)
+            row_id += 1
+
+            rows.append(row_id)
+            cols.append(idx)
+            data.append(1.0)
+            lower.append(-np.inf)
+            upper.append(xi_ub)
+            row_id += 1
+
+        A = sp.csc_matrix((data, (rows, cols)), shape=(row_id, self._n_var))
+        l = np.array(lower, dtype=float)
+        u = np.array(upper, dtype=float)
+
+        return P, q, A, l, u
+
+    def _setup_osqp(self, P, q, A, l, u) -> None:
+        """Configure the OSQP solver from the standard-form matrices."""
+        self._prob = self._osqp.OSQP()
+        self._prob.setup(
+            P=P,
+            q=q,
+            A=A,
+            l=l,
+            u=u,
+            verbose=False,
+            polishing=True,
+            eps_abs=1e-6,
+            eps_rel=1e-6,
+            max_iter=100000,
+            scaled_termination=True,
+            warm_starting=True,
+            adaptive_rho=True,
+        )
+
+    def _make_gurobi_env(self):
+        """Build a WLS ``gp.Env`` if credentials are configured, else None.
+
+        Returning None lets the caller fall back to Gurobi's default license
+        resolution (e.g. a local ``gurobi.lic``).
+        """
+        cfg = self.config
+        if cfg is None:
+            return None
+        if not (cfg.gurobi_access_id and cfg.gurobi_secret and cfg.gurobi_license_id):
+            return None
+        params = {
+            "WLSACCESSID": cfg.gurobi_access_id,
+            "WLSSECRET": cfg.gurobi_secret,
+            "LICENSEID": int(cfg.gurobi_license_id),
+            "OutputFlag": 0,
+        }
+        return self._gp.Env(params=params)
+
+    def _solve_gurobi(self, P, q, A, l, u) -> np.ndarray:
+        """Solve the standard-form QP with Gurobi and return the primal vector."""
+        gp = self._gp
+        GRB = gp.GRB
+
+        env = self._make_gurobi_env()
+        m = gp.Model(env=env) if env is not None else gp.Model()
+        # Dispose the model (and WLS env) after every solve so a caller looping
+        # over many cases with a cloud/WLS license doesn't leak a licensed session
+        # per solve. z.X is materialized into an owned array before disposal.
+        try:
+            m.Params.OutputFlag = 0
+            # Solver settings aligned with the retired SlakedQPwithLoad.slackedQP: barrier
+            # (Method=2) with crossover disabled returns the interior optimum, not a basic
+            # vertex. For the degenerate lambda=0 (linear) objective this is what makes the
+            # assignment distribution well-defined and reproducible across the two backends.
+            m.Params.Method = 2
+            m.Params.Crossover = 0
+
+            z = m.addMVar(self._n_var, lb=-GRB.INFINITY, ub=GRB.INFINITY)
+            m.setObjective(0.5 * (z @ P @ z) + q @ z, GRB.MINIMIZE)
+
+            # np.inf is not a valid Gurobi bound; GRB.INFINITY is its sentinel.
+            u_g = np.where(np.isposinf(u), GRB.INFINITY, u)
+            l_g = np.where(np.isneginf(l), -GRB.INFINITY, l)
+            c_ub = m.addConstr(A @ z <= u_g)
+            m.addConstr(A @ z >= l_g)
+
+            m.optimize()
+
+            if m.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
+                raise RuntimeError(f"Gurobi solve failed with status: {m.Status}")
+            if m.Status == GRB.SUBOPTIMAL:
+                warnings.warn(
+                    f"Gurobi did not solve to optimality (status: {m.Status}); "
+                    "returning the available primal iterate.",
+                    stacklevel=2,
+                )
+
+            # Capacity-row shadow prices come from the <= constraint (cap rows have l=-inf, so
+            # the >= constraint is slack there). Gurobi's Pi for a <= row in a min problem is
+            # <= 0; negate to match OSQP's (and the retired solver's) sign. Unavailable for some
+            # statuses -> leave None so extract_mediator_shadow_prices returns zeros.
+            try:
+                self._gurobi_row_duals = -np.array(c_ub.Pi, dtype=float)
+            except (AttributeError, gp.GurobiError):
+                self._gurobi_row_duals = None
+
+            if self._collect_stats:
+                # Capture before dispose(): the model (and its stats) are gone afterwards.
+                self._gurobi_solve_info = {
+                    "backend": "gurobi",
+                    "solver_status_code": int(m.Status),
+                    "gurobi_runtime_s": float(getattr(m, "Runtime", float("nan"))),
+                    "bar_iter_count": float(getattr(m, "BarIterCount", float("nan"))),
+                    "iter_count": float(getattr(m, "IterCount", float("nan"))),
+                    "node_count": float(getattr(m, "NodeCount", float("nan"))),
+                }
+
+            return np.array(z.X, dtype=float)
+        finally:
+            m.dispose()
+            if env is not None:
+                env.close()
+
+    def _solve_model(self) -> np.ndarray:
+        """Run OSQP and return the primal result vector."""
+        if self._prob is None:
+            raise RuntimeError("Model not built. Call solve() first.")
+
+        self._res = self._prob.solve()
+        status = str(self._res.info.status).lower()
+
+        # Status handling mirrors the reference SlackedQPwithLoadOSQP.py: accept only solved
+        # (incl. inaccurate) and a max-iter run that still returned a primal iterate; raise on
+        # everything else (primal/dual infeasible, unsolved, max-iter with no iterate) since
+        # such a vector does not satisfy the constraints and could violate capacity.
+        if status in ("solved", "solved inaccurate"):
+            pass
+        elif status == "maximum iterations reached" and self._res.x is not None:
+            warnings.warn(
+                f"OSQP hit max iterations (status: {self._res.info.status}); "
+                "returning the available primal iterate.",
+                stacklevel=2,
+            )
+        else:
+            raise RuntimeError(
+                f"OSQP solve failed with status: {self._res.info.status}"
+            )
+
+        return self._res.x
+
+    def _extract_assignments(
+        self, z: np.ndarray, tol: float = 1e-9
+    ) -> AssignmentDistribution:
+        """Read edge assignment values from the solver's primal result vector."""
+        assignments: AssignmentDistribution = {}
+
+        for (u, v), idx in self._x_index.items():
+            val = float(z[idx])
+            if val <= tol:
+                continue
+            assignments.setdefault(v, []).append((u, val))
+
+        for v, pairs in assignments.items():
+            # Real cases (id >= 0) are constrained to sum to 1; normalize so the
+            # contract holds exactly regardless of solver precision. Phantom cases
+            # (id < 0) are only bounded <= 1, so leave their sums as solved.
+            if v >= 0:
+                total = sum(p for _, p in pairs)
+                if total <= 0:
+                    assignments[v] = []  # degenerate: no mass, avoid divide-by-zero
+                    continue
+                pairs = [(u, p / total) for u, p in pairs]
+            assignments[v] = sorted(pairs, key=lambda pair: pair[1], reverse=True)
+
+        return assignments
+
+    def _build_solve_stats(self, P, q, A, z, wall_clock_s: float) -> dict:
+        """Assemble the solve diagnostics dict for ``last_solve_stats``.
+
+        A unified schema across backends: model structure (sizes, sparsity, per-case degree),
+        the objective in the original maximization form, and wall-clock plus backend-native
+        solver timing/iteration counters. Reusable on its own; the research sim serializes it.
+        """
+        mediators_per_case: Dict[CaseId, int] = {}
+        for (_u, v) in self._edges:
+            mediators_per_case[v] = mediators_per_case.get(v, 0) + 1
+        mpc = list(mediators_per_case.values())
+
+        num_vars = int(self._n_var)
+        num_constrs = int(A.shape[0])
+
+        # All case counts derive from the modeled graph (_vs), so they stay mutually consistent:
+        # a case with an unknown station/type or no eligible mediator is dropped by _build_graph
+        # and counts in none of them. Phantom cases carry id < 0 throughout.
+        modeled_ids = list(dict.fromkeys(self._vs))
+        num_real_cases = sum(1 for v in modeled_ids if v >= 0)
+        num_phantom_cases = sum(1 for v in modeled_ids if v < 0)
+
+        # Original objective is a maximization; the standard form negates it (min 0.5 z'Pz + q'z).
+        min_obj = 0.5 * float(z @ (P @ z)) + float(q @ z)
+
+        stats = {
+            "num_real_cases": num_real_cases,
+            "num_phantom_cases": num_phantom_cases,
+            "num_total_cases": len(modeled_ids),
+            "num_valid_mediators": len(self._us),
+            "num_edges": len(self._edges),
+            "avg_mediators_per_case": (sum(mpc) / len(mpc)) if mpc else 0.0,
+            "min_mediators_per_case": min(mpc) if mpc else 0,
+            "max_mediators_per_case": max(mpc) if mpc else 0,
+            "num_vars": num_vars,
+            "num_x_vars": int(self._n_x),
+            "num_xi_vars": int(self._n_xi),
+            "num_constrs": num_constrs,
+            "num_assignment_constrs": len({v for (_u, v) in self._edges}),
+            "num_capacity_constrs": len(self._cap_rows),
+            "num_linear_nz": int(A.nnz),
+            "num_quadratic_nz": int(P.nnz),
+            "flop_proxy_cubic_numvars_plus_numconstrs": float(num_vars + num_constrs) ** 3,
+            "lambda": self.lambda_penalty,
+            "time_horizon": self.time_horizon,
+            "objective_value": -min_obj,
+            "wall_clock_s": wall_clock_s,
+        }
+
+        if self.use_gurobi:
+            stats.update(self._gurobi_solve_info or {"backend": "gurobi"})
+        else:
+            info = self._res.info if self._res is not None else None
+            stats.update({
+                "backend": "osqp",
+                "solver_status": str(getattr(info, "status", None)),
+                "iter_count": int(getattr(info, "iter", -1)),
+                "osqp_run_time_s": float(getattr(info, "run_time", np.nan)),
+                "osqp_setup_time_s": float(getattr(info, "setup_time", np.nan)),
+                "osqp_solve_time_s": float(getattr(info, "solve_time", np.nan)),
+                "prim_res": float(getattr(info, "prim_res", np.nan)),
+                "dual_res": float(getattr(info, "dual_res", np.nan)),
+            })
+        return stats
+
+    @property
+    def _row_duals(self) -> Optional[np.ndarray]:
+        """Dual vector aligned with the A-matrix rows from the last solve, or None."""
+        if self.use_gurobi:
+            return self._gurobi_row_duals
+        if self._res is not None and self._res.y is not None:
+            return np.asarray(self._res.y)
+        return None
+
+    def extract_mediator_shadow_prices(self) -> Dict[MediatorId, float]:
+        """Per-mediator C3 shadow price: the sum over the horizon of the per-day
+        capacity-constraint duals.
+
+        Reproduces the retired ``slackedQP.extract_mediator_shadow_prices`` (the ``dual_soln``
+        path). Returns zeros when there is no solve or no duals are available. OSQP dual sign
+        conventions may differ from Gurobi Pi; the Gurobi backend negates Pi to match OSQP.
+        """
+        duals = self._row_duals
+        if duals is None:
+            return {u: 0.0 for u in self._us}
+        return {
+            u: float(sum(duals[self._cap_rows[(u, d)]]
+                         for d in range(self.time_horizon)
+                         if (u, d) in self._cap_rows))
+            for u in self._us
+        }
+
+    def solve(
+        self,
+        cases: List[CaseProtocol],
+        phantom_cases: Optional[List[CaseProtocol]] = None,
+        current_day: Optional[Union[date, datetime]] = None,
+        collect_stats: bool = False,
+    ) -> AssignmentDistribution:
+        """
+        Solve the assignment problem.
+
+        Args:
+            cases: List of cases to assign
+            phantom_cases: Optional list of phantom (future) cases
+            current_day: Current date for time-horizon calculations
+            collect_stats: populate ``last_solve_stats`` with model-structure and
+                solver timing/iteration diagnostics for this solve
+
+        Returns:
+            Dictionary mapping case_id -> [(mediator_id, probability), ...]
+            sorted by probability descending
+        """
+        self._current_day = current_day
+        phantom_cases = phantom_cases or []
+        self._collect_stats = collect_stats
+        self.last_solve_stats = None
+        self._gurobi_solve_info = None
+
+        self._build_graph(cases, phantom_cases)
+        P, q, A, l, u = self._build_matrices()
+
+        wall_start = time.perf_counter()
+        if self.use_gurobi:
+            z = self._solve_gurobi(P, q, A, l, u)
+        else:
+            self._setup_osqp(P, q, A, l, u)
+            z = self._solve_model()
+        wall_clock_s = time.perf_counter() - wall_start
+
+        if collect_stats:
+            self.last_solve_stats = self._build_solve_stats(P, q, A, z, wall_clock_s)
+
+        return self._extract_assignments(z)

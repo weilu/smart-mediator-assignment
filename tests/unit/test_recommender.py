@@ -1,5 +1,7 @@
-import pytest
+import importlib.util
 from datetime import date
+
+import pytest
 
 from smart_mediator_assignment import (
     SimpleCase,
@@ -9,6 +11,8 @@ from smart_mediator_assignment import (
     get_recommendations,
     get_recommendations_batch,
 )
+
+osqp_missing = importlib.util.find_spec("osqp") is None
 from tests.fixtures import (
     SCENARIO1_VALID_MEDS,
     SCENARIO1_MED_BY_CRT_CASE_TYPE,
@@ -354,3 +358,63 @@ class TestIntegration:
 
         assert 1 in results
         assert 2 in results
+
+
+@pytest.mark.skipif(osqp_missing, reason="osqp extra not installed")
+class TestUseQPPath:
+    """Cover the recommender's use_qp branch through the public API.
+
+    The QP tests instantiate QPSolver directly, so a regression in _select_solver_cls or in
+    the config/constructor forwarding would otherwise slip past. Exercise both entry points with
+    AlgorithmConfig(use_qp=True) so the QP solver actually runs end-to-end.
+    """
+
+    def test_select_solver_cls_routes_on_use_qp(self):
+        # Directly pin the selection logic: an end-to-end test alone can't catch an LP fallback
+        # (LP also returns a valid result), which is exactly the regression Copilot flagged.
+        from smart_mediator_assignment.assignment.recommender import _select_solver_cls
+        from smart_mediator_assignment.solver.qp_solver import QPSolver
+        from smart_mediator_assignment.solver.lp_solver import LPSolver
+        assert _select_solver_cls(AlgorithmConfig(use_qp=True)) is QPSolver
+        assert _select_solver_cls(AlgorithmConfig(use_qp=False)) is LPSolver
+
+    def test_single_recommendation_with_qp(self):
+        case = SimpleCase(id=1, case_type="Family group", court_station="KAKAMEGA",
+                          referral_date=date(2023, 1, 1), p_value=0.5)
+        belief_state = make_belief_state(SCENARIO1_MED_VA)
+        config = AlgorithmConfig(capacity=3, lambda_penalty=1.0, time_horizon=10, use_qp=True)
+
+        result = get_recommendations(
+            case=case,
+            eligible_mediator_ids=SCENARIO1_VALID_MEDS,
+            mediator_case_loads={1: 0, 2: 0, 3: 0},
+            belief_state=belief_state,
+            med_by_court_case_type=SCENARIO1_MED_BY_CRT_CASE_TYPE,
+            config=config,
+            current_day=date(2023, 1, 1),
+        )
+
+        assert result.case_id == 1
+        assert len(result.recommendations) > 0
+        assert result.get_top_mediator() == 1  # highest VA when loads are equal
+
+    def test_batch_recommendations_with_qp(self):
+        cases = [SimpleCase(id=i, case_type="Family group", court_station="KAKAMEGA",
+                            referral_date=date(2023, 1, 1), p_value=0.5) for i in range(1, 4)]
+        belief_state = make_belief_state(SCENARIO1_MED_VA)
+        config = AlgorithmConfig(capacity=3, lambda_penalty=1.0, time_horizon=10, use_qp=True)
+
+        results = get_recommendations_batch(
+            cases=cases,
+            eligible_mediator_ids=SCENARIO1_VALID_MEDS,
+            mediator_case_loads={1: 0, 2: 0, 3: 0},
+            belief_state=belief_state,
+            med_by_court_case_type=SCENARIO1_MED_BY_CRT_CASE_TYPE,
+            config=config,
+            current_day=date(2023, 1, 1),
+            generate_phantoms=False,
+        )
+
+        assert set(results) == {1, 2, 3}
+        for case_id in (1, 2, 3):
+            assert results[case_id].case_id == case_id

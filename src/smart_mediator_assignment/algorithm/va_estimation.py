@@ -7,13 +7,15 @@ characteristics, then applies shrinkage to produce stable VA estimates.
 """
 
 from dataclasses import dataclass
-from datetime import datetime, date
+from datetime import datetime
 from typing import Union, Optional, List, Dict
+import calendar
 import pandas as pd
 import numpy as np
 
 from ..core.types import MediatorId
 from ..core.case import CaseProtocol
+from .case_types import simplify_case_types
 
 
 @dataclass
@@ -62,6 +64,9 @@ class VAEstimationResult:
     mediator_vas: List[MediatorVAEstimate]
     case_predictions: List[CasePrediction]
     sigma: float
+    # Clean, collapsed, pre-fit frame -- reusable as the input to
+    # estimate_va_from_prepared for incremental refresh without re-cleaning.
+    prepared: Optional[pd.DataFrame] = None
 
     def get_va_dict(self) -> Dict[MediatorId, float]:
         """Return VA estimates as dictionary."""
@@ -105,6 +110,60 @@ def _calculate_half_means(group: pd.DataFrame, mediator_id: int) -> pd.DataFrame
     return group
 
 
+def _simplify_case_types(df: pd.DataFrame) -> pd.DataFrame:
+    """Simplify case types into broader groupings for regression.
+
+    Delegates to the shared taxonomy (algorithm.case_types). Uses the 'AAAFamily group'
+    label so the family grouping sorts first and becomes the omitted reference category in
+    the fixed-effects regression.
+
+    Args:
+        df: DataFrame with 'case_type' column
+
+    Returns:
+        DataFrame with added 'casetype_simplified' column
+    """
+    df = df.copy()
+    df['casetype_simplified'] = simplify_case_types(
+        df['case_type'], family_group_label='AAAFamily group'
+    )
+    return df
+
+
+def _assign_quasiyear(df: pd.DataFrame, reference_date) -> pd.DataFrame:
+    """Assign quasiyear and appt_month columns to cases based on appointment date.
+
+    Buckets appointments into roughly annual buckets using true calendar month-ends
+    (via calendar.monthrange) as boundaries. Collapses the oldest bucket into the
+    previous one when it spans < 365 days.
+
+    Args:
+        df: DataFrame with 'med_appt_date' column
+        reference_date: Reference date for bucketing
+
+    Returns:
+        DataFrame with added 'appt_month' and 'quasiyear' columns
+    """
+    df = df.copy()
+    df['appt_month'] = df['med_appt_date'].dt.month
+    df['quasiyear'] = np.nan
+    ref_month, ref_year = reference_date.month, reference_date.year
+    for t in range(31):
+        yu = ref_year - t
+        ub = datetime(yu, ref_month, calendar.monthrange(yu, ref_month)[1])
+        yl = ref_year - t - 1
+        lb = datetime(yl, ref_month, calendar.monthrange(yl, ref_month)[1])
+        df.loc[(df['med_appt_date'] <= ub) & (df['med_appt_date'] > lb), 'quasiyear'] = t
+    # collapse the oldest bucket into the previous one when it spans < 1 year
+    oldest_qy = df['quasiyear'].max()
+    if pd.notna(oldest_qy):
+        max_qy = df.loc[df['quasiyear'] == oldest_qy, 'med_appt_date'].max()
+        min_qy = df.loc[df['quasiyear'] == oldest_qy, 'med_appt_date'].min()
+        if pd.notna(max_qy) and (max_qy - min_qy).days < 365:
+            df.loc[df['quasiyear'] == oldest_qy, 'quasiyear'] -= 1
+    return df
+
+
 def estimate_va(
     cases: List[CaseProtocol],
     config: Optional[VAEstimationConfig] = None,
@@ -120,15 +179,13 @@ def estimate_va(
     Args:
         cases: List of cases conforming to CaseProtocol
         config: Configuration for estimation (uses defaults if None)
-        start_date: Filter cases with referral_date >= start_date
-        end_date: Filter cases with referral_date < end_date
+        start_date: Filter cases with mediator_appointment_date >= start_date
+        end_date: Filter cases with mediator_appointment_date < end_date
 
     Returns:
-        VAEstimationResult containing mediator VAs, case predictions, and sigma
+        VAEstimationResult containing mediator VAs, case predictions, sigma,
+        and the reusable `prepared` frame (see estimate_va_from_prepared).
     """
-    import statsmodels.api as sm
-    from linearmodels.iv import absorbing
-
     if config is None:
         config = VAEstimationConfig.default()
 
@@ -136,6 +193,16 @@ def estimate_va(
         start_date = datetime.strptime(start_date, '%Y-%m-%d')
     if isinstance(end_date, str):
         end_date = datetime.strptime(end_date, '%Y-%m-%d')
+
+    # Match VA_Antoine.py:89-96: only apply the start/end window (and re-anchor the
+    # quasiyear bucketing on end_date) when end_date precedes the datapull/reference
+    # date. When end_date == reference_date, all cases are used and waiting-for-
+    # appointment (NaT med_appt_date) cases are retained for prediction.
+    apply_window = (
+        start_date is not None and end_date is not None
+        and end_date < config.reference_date
+    )
+    anchor_date = end_date if apply_window else config.reference_date
 
     df = _cases_to_dataframe(cases)
 
@@ -152,15 +219,7 @@ def estimate_va(
         (config.reference_date - df['med_appt_date']).dt.days
 
     # Simplify case types (Family group as reference)
-    df['casetype_simplified'] = df['case_type']
-    family_types = ['Civil Cases', 'Civil Appeals']
-    df.loc[df['case_type'].isin(family_types), 'casetype_simplified'] = 'Civil group'
-
-    family_group_types = [
-        'Divorce and Separation', 'Family Appeals', 'Family Miscellaneous',
-        'Succession (Probate & Administration - P&A)'
-    ]
-    df.loc[df['case_type'].isin(family_group_types), 'casetype_simplified'] = 'AAAFamily group'
+    df = _simplify_case_types(df)
 
     # Court indicators
     df['highcourt'] = (df['court_type'] == 'High Court').astype(int)
@@ -170,18 +229,17 @@ def estimate_va(
     df.loc[df['court_station'] == 'MILIMANI', 'court_station'] = 'AAAMilimani'
 
     # Generate quasi-year and month indicators
-    df['appt_month'] = df['med_appt_date'].dt.month
-    df['quasiyear'] = np.nan
-    for t in range(31):
-        ub = datetime(config.reference_date.year - t, config.reference_date.month, 28)
-        lb = datetime(config.reference_date.year - t - 1, config.reference_date.month, 28)
-        mask = (df['med_appt_date'] <= ub) & (df['med_appt_date'] > lb)
-        df.loc[mask, 'quasiyear'] = t
+    df = _assign_quasiyear(df, anchor_date)
+
+    # Case-level frame: captured before the "data issue" drops below, so cases
+    # excluded from the fit (missing mediator, pandemic period, singleton
+    # mediator/court-station/case-type groups) can still get a p_pred.
+    df_case = df.copy()
 
     # Drop invalid cases
     df = df.dropna(subset=['mediator_id'])
     df = df.dropna(subset=['med_appt_date'])
-    df = df.dropna(subset=['referral_date'])
+    # df = df.dropna(subset=['referral_date'])
     df = df[df['case_days_med'] >= 0]
 
     # Exclude pandemic period
@@ -189,11 +247,12 @@ def estimate_va(
         config.pandemic_start, config.pandemic_end, inclusive="both"
     )]
 
-    # Filter by date range
-    if start_date is not None:
-        df = df.loc[df['referral_date'] >= start_date]
-    if end_date is not None:
-        df = df.loc[df['referral_date'] < end_date]
+    # Window filter (VA_Antoine.py:93) -- only when end_date precedes the reference date;
+    # applied to df_case too so the fitted and prediction frames share one population.
+    # When end_date == reference_date the reference uses all cases (NaT-appt rows kept).
+    if apply_window:
+        df = df.loc[df['med_appt_date'].between(start_date, end_date, inclusive="left")]
+        df_case = df_case.loc[df_case['med_appt_date'].between(start_date, end_date, inclusive="left")]
 
     # Group small mediators
     concltotal = df[df['case_status'] == 'CONCLUDED'].groupby('mediator_id').size()
@@ -215,6 +274,95 @@ def estimate_va(
     concltotal = df[df['case_status'] == 'CONCLUDED'].groupby('casetype_simplified').size()
     df = df.merge(concltotal.rename('concltotal_ct'), on='casetype_simplified', how='left')
     df.loc[df['concltotal_ct'] < config.min_case_type_cases, 'casetype_simplified'] = 'zzzSmall'
+
+    # Clean, collapsed, pre-fit frame -- captured before df_case's label backfill
+    # below and before _fit_and_score mutates df, so it can be reused verbatim by
+    # estimate_va_from_prepared for incremental refresh.
+    prepared_frame = df.copy()
+
+    # Backfill the small-group collapse (mediator_id/court_station/casetype_simplified ->
+    # -999/zzzSmall) onto df_case for rows that survived into the fitted df. Without this,
+    # no df_case row is ever labeled 'zzzSmall', so the zzzSmall param merge below never
+    # matches and small-station/small-casetype cases get their coefficient silently
+    # zeroed via skipna=True (VA_Antoine.py:229-235).
+    df_case = df_case.set_index('id')
+    df_case.update(df.set_index('id')[['mediator_id', 'court_station', 'casetype_simplified']])
+    df_case = df_case.reset_index()
+
+    # Waiting-for-appointment cases (no med_appt_date -> NaN quasiyear/appt_month from
+    # _assign_quasiyear) still need prediction covariates so they get a p_pred instead of a
+    # silently-zeroed one. Faithful to VA_Antoine.py:243: quasiyear -> the oldest observed
+    # bucket (quasiyear=0 is newest, higher is older, so .max() is the oldest), month -> the
+    # anchor month. Value-locked by test_df_case_p_pred_matches_golden, whose PENDING-case subset
+    # covers this branch to 1e-9.
+    qy_mask = df_case['quasiyear'].isna() & ~df_case['med_appt_date'].between(
+        config.pandemic_start, config.pandemic_end, inclusive="both")
+    df_case.loc[qy_mask, 'quasiyear'] = df['quasiyear'].max()
+    df_case.loc[df_case['appt_month'].isna(), 'appt_month'] = anchor_date.month
+
+    result = _fit_and_score(df, df_case, config)
+    result.prepared = prepared_frame
+    return result
+
+
+def estimate_va_from_prepared(
+    prepared: pd.DataFrame,
+    config: Optional[VAEstimationConfig] = None,
+    *,
+    start_date: Union[str, datetime],
+    end_date: Union[str, datetime],
+) -> VAEstimationResult:
+    """
+    Re-estimate mediator VA from a previously prepared (cleaned, collapsed) frame.
+
+    Skips the cleaning pipeline entirely -- `prepared` must be a frame produced
+    by `estimate_va` (i.e. `result.prepared`). Filters by both `med_appt_date`
+    and `concl_date` within `[start_date, end_date)`, since a growing window's
+    conclusion dates lag appointment dates.
+
+    Args:
+        prepared: Clean, collapsed frame from a prior `estimate_va` call
+        config: Configuration for estimation (uses defaults if None)
+        start_date: Filter cases with med_appt_date/concl_date >= start_date
+        end_date: Filter cases with med_appt_date/concl_date < end_date
+
+    Returns:
+        VAEstimationResult containing mediator VAs, case predictions, sigma,
+        and `prepared` set to the input frame (unchanged, for further reuse).
+    """
+    if config is None:
+        config = VAEstimationConfig.default()
+
+    if isinstance(start_date, str):
+        start_date = datetime.strptime(start_date, '%Y-%m-%d')
+    if isinstance(end_date, str):
+        end_date = datetime.strptime(end_date, '%Y-%m-%d')
+
+    df = prepared.loc[
+        prepared['med_appt_date'].between(start_date, end_date, inclusive="left")
+        & prepared['concl_date'].between(start_date, end_date, inclusive="left")
+    ].copy()
+    # Labels already collapsed in `prepared` -- unlike the fresh path, no 4.1 backfill here.
+    df_case = df.copy()
+
+    result = _fit_and_score(df, df_case, config)
+    result.prepared = prepared
+    return result
+
+
+def _fit_and_score(
+    df: pd.DataFrame,
+    df_case: pd.DataFrame,
+    config: VAEstimationConfig,
+) -> VAEstimationResult:
+    """
+    Shared core: regression, prediction, and shrinkage over an already-cleaned frame.
+
+    Shared by estimate_va (fresh path) and estimate_va_from_prepared (reuse path).
+    Does NOT set `.prepared` -- each entry point sets it after calling this.
+    """
+    import statsmodels.api as sm
+    from linearmodels.iv import absorbing
 
     # Estimation dataset (cases appointed >= threshold days ago)
     df_estim = df[df['days_since_appt'] >= config.days_since_appt_threshold]
@@ -277,10 +425,16 @@ def estimate_va(
     params_dict['params_const']['case_outcome_agreement'] = 1
     params_dict['params_const'].loc[-1] = [0, params_dict['params_const']['const_val'].mean()]
 
-    # Handle pending cases
+    # Handle pending cases (applied to both frames; the fresh-pending drop is df-only
+    # since df_case must still carry every windowed case through to prediction)
     df.loc[
         (df['days_since_appt'] > config.pending_outcome_threshold_days) &
         (df['case_status'] == 'PENDING'),
+        'case_outcome_agreement'
+    ] = 0
+    df_case.loc[
+        (df_case['days_since_appt'] > config.pending_outcome_threshold_days) &
+        (df_case['case_status'] == 'PENDING'),
         'case_outcome_agreement'
     ] = 0
     df = df[~(
@@ -288,23 +442,40 @@ def estimate_va(
         (df['case_status'] == 'PENDING')
     )]
 
-    # Merge parameters to get predictions
-    df = df.merge(params_dict['params_appt_month'], on='appt_month', how='left')
-    df = df.merge(params_dict['params_quasiyear'], on='quasiyear', how='left')
-    df = df.merge(params_dict['params_casetype_simplified'], on='casetype_simplified', how='left')
-    df = df.merge(params_dict['params_court_station'], on='court_station', how='left')
-    df = df.merge(params_dict['params_referral_mode'], on='referral_mode', how='left')
-    df = df.merge(params_dict['params_highcourt'], on='highcourt', how='left')
-    df = df.merge(params_dict['params_courtofappeal'], on='courtofappeal', how='left')
-    df = df.merge(params_dict['params_const'], on='case_outcome_agreement', how='left')
+    # Merge parameters to get predictions over ALL cases (df_case), not just the
+    # fitted sample, so cases dropped above still get a p_pred.
+    df_case = df_case.merge(params_dict['params_appt_month'], on='appt_month', how='left')
+    df_case = df_case.merge(params_dict['params_quasiyear'], on='quasiyear', how='left')
+    df_case = df_case.merge(params_dict['params_casetype_simplified'], on='casetype_simplified', how='left')
+    df_case = df_case.merge(params_dict['params_court_station'], on='court_station', how='left')
+    df_case = df_case.merge(params_dict['params_referral_mode'], on='referral_mode', how='left')
+    df_case = df_case.merge(params_dict['params_highcourt'], on='highcourt', how='left')
+    df_case = df_case.merge(params_dict['params_courtofappeal'], on='courtofappeal', how='left')
+    # params_const is keyed on case_outcome_agreement {0,1}; pending cases (null outcome) do
+    # not match, so const_val stays NaN and the skipna sum below drops the intercept for them.
+    # Faithful to VA_Antoine.py - changing it would diverge from the parity baseline.
+    df_case = df_case.merge(params_dict['params_const'], on='case_outcome_agreement', how='left')
 
     # Calculate predictions and residuals
-    df['p_pred'] = df[[
+    df_case['p_pred'] = df_case[[
         'appt_month_val', 'quasiyear_val', 'casetype_simplified_val',
         'court_station_val', 'referral_mode_val', 'highcourt_val',
         'courtofappeal_val', 'const_val'
     ]].sum(axis=1, skipna=True)
-    df['residuals'] = df['case_outcome_agreement'] - df['p_pred']
+
+    # Faithful to VA_Antoine.py including its ordering: p_pred was already summed above, so
+    # this court_station fillna runs too late to affect p_pred/residuals (an effective no-op).
+    # Kept verbatim for bit-exact parity - do not reorder without re-baselining VA.
+    small_mask = df_case['court_station'] == 'zzzSmall'
+    if small_mask.any():
+        cs_small_value = df_case.loc[small_mask, 'court_station_val'].iloc[0]
+        df_case['court_station_val'] = df_case['court_station_val'].fillna(cs_small_value)
+
+    df_case['residuals'] = df_case['case_outcome_agreement'] - df_case['p_pred']
+
+    # Map predictions/residuals back onto the fitted df for shrinkage/VA below
+    df['p_pred'] = df['id'].map(df_case.set_index('id')['p_pred'])
+    df['residuals'] = df['id'].map(df_case.set_index('id')['residuals'])
 
     # Calculate VA with shrinkage
     df['total_med_cases'] = df.groupby('mediator_id')['residuals'].transform('count')
@@ -360,15 +531,19 @@ def estimate_va(
         if row['mediator_id'] != -999
     ]
 
+    # VA is only defined for mediators in the fitted df; cases present only in
+    # df_case (dropped above for data issues) get NaN here.
+    df_case['va'] = df_case['id'].map(df.set_index('id')['va'])
+
     case_predictions = [
         CasePrediction(
             case_id=int(row['id']),
-            mediator_id=int(row['mediator_id']),
+            mediator_id=int(row['mediator_id']) if pd.notna(row['mediator_id']) else -999,
             p_pred=float(row['p_pred']),
             va=float(row['va']),
             case_outcome_agreement=int(row['case_outcome_agreement']) if pd.notna(row['case_outcome_agreement']) else None
         )
-        for _, row in df[['id', 'mediator_id', 'p_pred', 'va', 'case_outcome_agreement']].iterrows()
+        for _, row in df_case[['id', 'mediator_id', 'p_pred', 'va', 'case_outcome_agreement']].iterrows()
     ]
 
     return VAEstimationResult(

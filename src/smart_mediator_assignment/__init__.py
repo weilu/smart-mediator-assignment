@@ -14,7 +14,7 @@ from .core import (
     MediatorBelief,
     BeliefState,
 )
-from .solver import LPSolver, AssignmentDistribution
+from .solver import LPSolver, QPSolver, AssignmentDistribution
 from .algorithm import (
     compute_posterior,
     update_belief,
@@ -26,6 +26,11 @@ from .algorithm import (
     CasePrediction,
     VAEstimationResult,
     estimate_va,
+    estimate_va_from_prepared,
+    estimate_lognormal_duration_params,
+    clean_hazard_sample,
+    simplify_case_types,
+    LEGACY_2_SIMPLIFIED_CTYPE,
 )
 from .assignment import (
     MediatorRecommendation,
@@ -34,7 +39,7 @@ from .assignment import (
     get_recommendations_batch,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 
 __all__ = [
     # Config
@@ -48,6 +53,7 @@ __all__ = [
     "BeliefState",
     # Solver
     "LPSolver",
+    "QPSolver",
     "AssignmentDistribution",
     # Algorithm - Bayesian
     "compute_posterior",
@@ -61,6 +67,13 @@ __all__ = [
     "CasePrediction",
     "VAEstimationResult",
     "estimate_va",
+    "estimate_va_from_prepared",
+    # Case-type taxonomy (shared by VA + duration)
+    "LEGACY_2_SIMPLIFIED_CTYPE",
+    "simplify_case_types",
+    # Duration estimation
+    "estimate_lognormal_duration_params",
+    "clean_hazard_sample",
     # Assignment
     "MediatorRecommendation",
     "RecommendationResult",

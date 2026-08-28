@@ -5,12 +5,10 @@ These strategies determine how VA estimates are obtained from the belief state
 for use in the assignment algorithm.
 """
 
-from typing import Dict, Optional
-
-import numpy as np
+from typing import Optional
 
 from ..core.belief import BeliefState
-from ..core.types import MediatorId, MediatorVAs
+from ..core.types import MediatorVAs
 
 
 class VAStrategy:
